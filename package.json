@@ -1,0 +1,29 @@
+{
+  "name": "nodejs-rest-api-mysql",
+  "version": "1.0.0",
+  "description": "IT BSM - Andreas Abi Permana",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Zeldianto EP",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^1.19.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.17.1",
+    "mysql": "^2.18.1",
+    "nodemon": "^2.0.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@gitlab.com/abipermana/bsm-api.git"
+  },
+  "keywords": [],
+  "bugs": {
+    "url": "https://gitlab.com/abipermana/bsm-api/issues"
+  },
+  "homepage": "https://gitlab.com/abipermana/bsm-api#readme",
+  "devDependencies": {}
+}

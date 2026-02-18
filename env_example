@@ -1,0 +1,7 @@
+DB_HOST=localhost
+DB_NAME=hrd
+DB_USER=root
+DB_PASSWORD=password
+DB_PORT=3306
+PORT=8080
+NODE_ENV=production
