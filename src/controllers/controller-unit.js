@@ -51,9 +51,9 @@ module.exports = {
             if (err) throw err;
             connection.query(
                 `
-                SELECT * FROM tunit 
-                WHERE nm_unit LIKE '%RotiQ%'
-                ORDER BY nm_unit;
+                SELECT CAST(kd_unit AS char) kd_unit, nm_unit, dbase, latitude, longitude, cabang, kode_cabang, jam_kerja FROM tunit 
+WHERE nm_unit LIKE '%RotiQ%'
+ORDER BY nm_unit;
                 `,
                 function (error, results) {
                     if (error) throw error;
