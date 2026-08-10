@@ -5,17 +5,19 @@ const cors = require('cors')
 
 require('dotenv').config;
 
-// EDIT DI SINI - Ganti app.use(cors()) menjadi:
 app.use(cors({
-  origin: '*', // Allow semua origin termasuk ngrok
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin']
 }));
 
 app.use(bodyParser.urlencoded({
-    extended: false
+    extended: false,
+    limit: '10mb'
 }))
-app.use(bodyParser.json())
+app.use(bodyParser.json({
+    limit: '10mb'
+}))
 
 const appRoute = require('./src/routes/route');
 app.use('/', appRoute);

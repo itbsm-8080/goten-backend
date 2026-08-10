@@ -7,6 +7,71 @@ pool.on('error', (err) => {
 });
 
 module.exports = {
+    // Login dengan NIK + password permanen (tanpa OTP/expired)
+    login(req, res) {
+        let { kar_nik, password } = req.body;
+
+        if (!kar_nik || !password) {
+            return res.status(400).send({
+                success: false,
+                message: 'NIK dan password wajib diisi'
+            });
+        }
+
+        pool.getConnection(function (err, connection) {
+            if (err) {
+                connection.release();
+                return res.status(500).send({ success: false, message: 'Database error' });
+            }
+
+            connection.query(
+                `SELECT kar_nik, kar_nama, kar_kd_unit, kar_kd_jabat, password
+                 FROM tkaryawan
+                 WHERE kar_nik = ? AND kar_status_aktif = 1`,
+                [kar_nik],
+                function (error, results) {
+                    if (error) {
+                        connection.release();
+                        return res.status(500).send({ success: false, message: 'Database error' });
+                    }
+
+                    if (!results.length) {
+                        connection.release();
+                        return res.status(401).send({ success: false, message: 'Karyawan tidak ditemukan atau tidak aktif' });
+                    }
+
+                    let user = results[0];
+
+                    if (!user.password || user.password !== password) {
+                        connection.release();
+                        return res.status(401).send({ success: false, message: 'NIK atau password salah' });
+                    }
+
+                    // Generate PERMANENT TOKEN (tanpa expiry)
+                    const tokenData = {
+                        kar_nik: user.kar_nik,
+                        timestamp: Date.now()
+                    };
+
+                    const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
+
+                    res.send({
+                        success: true,
+                        message: 'Login berhasil',
+                        token: token,
+                        user: {
+                            kar_nik: user.kar_nik,
+                            kar_nama: user.kar_nama,
+                            kar_kd_unit: user.kar_kd_unit,
+                            kar_kd_jabat: user.kar_kd_jabat
+                        }
+                    });
+                    connection.release();
+                }
+            );
+        });
+    },
+
     // Generate OTP untuk login
     generateOTP(req, res) {
         let { kar_nik } = req.body;
@@ -158,7 +223,7 @@ module.exports = {
                 if (err) throw err;
                 
                 connection.query(
-                    `SELECT kar_nik, kar_nama, kar_kd_unit 
+                    `SELECT kar_nik, kar_nama, kar_kd_unit, kar_kd_jabat 
                      FROM tkaryawan 
                      WHERE kar_nik = ? AND kar_status_aktif = 1`,
                     [tokenData.kar_nik],
@@ -179,7 +244,8 @@ module.exports = {
                             user: {
                                 kar_nik: user.kar_nik,
                                 kar_nama: user.kar_nama,
-                                kar_kd_unit: user.kar_kd_unit
+                                kar_kd_unit: user.kar_kd_unit,
+                                kar_kd_jabat: user.kar_kd_jabat
                             }
                         });
                         connection.release();

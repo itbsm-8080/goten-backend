@@ -4,6 +4,7 @@ const absen = require('./controller-absen');
 const jabatan = require('./controller-jabatan');
 const statistik = require('./controller-statistik');
 const auth = require('./controller-auth');
+const pod = require('./controller-pod');
 
 module.exports = {
 	karyawan,
@@ -11,5 +12,6 @@ module.exports = {
 	absen,
 	jabatan,
 	statistik,
-	auth
+	auth,
+	pod
 };

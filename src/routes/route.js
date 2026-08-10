@@ -17,6 +17,7 @@ const {
 const {
     auth
 } = require('../controllers');
+const { pod } = require('../controllers');
 
 
 
@@ -61,9 +62,17 @@ router.post('/statistik/bln_ini', statistik.getStatistikBlnIni);
 router.post('/statistik/all', statistik.getStatistikAll);
 
 router.post('/auth/generate-otp', auth.generateOTP);
+router.post('/auth/login', auth.login);
 router.post('/auth/verify-otp', auth.verifyOTPLogin);
 router.post('/auth/verify-token', auth.verifyToken);
 
 router.get('/unitrotiq', unit.getRotiQUnits);
+
+// Proof of Delivery
+router.post('/pod/list', pod.getPOD);
+router.post('/pod/cari-do', pod.cariDO);
+router.post('/pod/tambah', pod.tambahPOD);
+router.post('/pod/edit', pod.editPOD);
+router.post('/pod/hapus', pod.hapusPOD);
 
 module.exports = router;
