@@ -47,14 +47,23 @@ async function uploadFile(base64Data, filename) {
       res.on('end', () => {
         try {
           const resp = JSON.parse(body);
+          console.log('upload.php response:', resp);
           resolve(resp.status === 'success' ? resp.filename : null);
         } catch (e) {
+          console.error('upload.php parse error, body:', body.substring(0, 200));
           resolve(null);
         }
       });
     });
 
-    req.on('error', () => {
+    req.setTimeout(30000, () => {
+      console.error('upload.php timeout after 30s');
+      req.destroy();
+      resolve(null);
+    });
+
+    req.on('error', (err) => {
+      console.error('upload.php error:', err.message);
       resolve(null);
     });
 
