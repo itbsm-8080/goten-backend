@@ -4,7 +4,8 @@
   "description": "IT BSM - Andreas Abi Permana",
   "main": "app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js"
   },
   "author": "Zeldianto EP",
   "license": "ISC",

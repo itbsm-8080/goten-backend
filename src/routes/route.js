@@ -17,6 +17,8 @@ const {
 const {
     auth
 } = require('../controllers');
+
+const { izin } = require('../controllers');
 const { pod } = require('../controllers');
 
 
@@ -56,20 +58,33 @@ router.post('/absensi/tambah', absen.lakukanAbsensi);
 router.post('/absensi/tambahcoba', absen.lakukanAbsensiCoba);
 router.post('/absensi/history', absen.historyAbsensi);
 router.post('/absensi/hari-ini', absen.historyAbsensiHariIni);
+router.get('/absensi/shift', absen.getShiftDefault);
 
 
 router.post('/statistik/bln_ini', statistik.getStatistikBlnIni);
 router.post('/statistik/all', statistik.getStatistikAll);
 
-router.post('/auth/generate-otp', auth.generateOTP);
 router.post('/auth/login', auth.login);
-router.post('/auth/verify-otp', auth.verifyOTPLogin);
 router.post('/auth/verify-token', auth.verifyToken);
+router.post('/auth/logout', auth.logout);
 
 router.get('/unitrotiq', unit.getRotiQUnits);
 
+// Izin
+router.post('/izin/list', izin.getIzinKaryawan);
+router.post('/izin/tambah', izin.tambahIzin);
+router.post('/izin/edit', izin.editIzin);
+router.post('/izin/hapus', izin.hapusIzin);
+router.post('/izin/cek-role', izin.cekRoleApproval);
+router.post('/izin/approval-list', izin.getIzinApproval);
+router.post('/izin/proses', izin.prosesIzin);
+router.post('/izin/sisa-cuti', izin.getSisaCuti);
+router.post('/izin/cek-rotiq-mobile', izin.cekRotiQMobile);
+router.post('/izin/laporan', izin.getLaporanIzin);
+
 // Proof of Delivery
 router.post('/pod/list', pod.getPOD);
+router.post('/pod/list-belum', pod.getListBelum);
 router.post('/pod/cari-do', pod.cariDO);
 router.post('/pod/tambah', pod.tambahPOD);
 router.post('/pod/edit', pod.editPOD);

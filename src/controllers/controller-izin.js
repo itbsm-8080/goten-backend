@@ -408,7 +408,7 @@ module.exports = {
 
             // Query 1: Cek tgl masuk
             connection.query(
-                `SELECT kar_tgl_masuk FROM tkaryawan WHERE kar_nik = ? LIMIT 1`,
+                `SELECT kar_tgl_masuk, kar_kd_jabat, kar_sistem_gaji FROM tkaryawan WHERE kar_nik = ? LIMIT 1`,
                 [kar_nik],
                 function (error, karyawan) {
                     if (error) {
@@ -425,6 +425,32 @@ module.exports = {
                     }
 
                     const tglMasuk = karyawan[0].kar_tgl_masuk;
+                    const jabat = karyawan[0].kar_kd_jabat != null ? String(karyawan[0].kar_kd_jabat) : null;
+                    const sistemGaji = karyawan[0].kar_sistem_gaji;
+
+                    // Jabatan tertentu tidak berhak cuti
+                    if (jabat && ['16', '19', '22', '23', '24'].includes(jabat)) {
+                        connection.release();
+                        res.send({
+                            success: true,
+                            sisa_cuti: 0,
+                            total_cuti: 0,
+                            message: 'Jabatan tidak berhak cuti'
+                        });
+                        return;
+                    }
+
+                    // Hanya sistem gaji 'Bulanan' yang dapat cuti
+                    if (sistemGaji !== 'Bulanan') {
+                        connection.release();
+                        res.send({
+                            success: true,
+                            sisa_cuti: 0,
+                            total_cuti: 0,
+                            message: 'Sistem gaji bukan Bulanan'
+                        });
+                        return;
+                    }
 
                     // Jika kar_tgl_masuk NULL, anggap belum 1 tahun
                     if (!tglMasuk) {
