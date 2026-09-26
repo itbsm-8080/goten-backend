@@ -58,7 +58,7 @@ router.post('/absensi/tambah', absen.lakukanAbsensi);
 router.post('/absensi/tambahcoba', absen.lakukanAbsensiCoba);
 router.post('/absensi/history', absen.historyAbsensi);
 router.post('/absensi/hari-ini', absen.historyAbsensiHariIni);
-router.get('/absensi/shift', absen.getShiftDefault);
+router.post('/absensi/shift', absen.getShiftDefault);
 
 
 router.post('/statistik/bln_ini', statistik.getStatistikBlnIni);

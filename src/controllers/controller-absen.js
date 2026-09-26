@@ -20,10 +20,10 @@ function waktuJakarta() {
     }).replace(',', '');
 }
 
-// tanggal_kerja: check-out shift 3 (malam) = hari sebelumnya; lainnya = tanggal absen
-function hitungTanggalKerja(tanggal, status_absen, shift) {
+// tanggal_kerja: check-out shift 3 Senin-Jumat (23-07) = hari sebelumnya; lainnya = tanggal absen
+function hitungTanggalKerja(tanggal, status_absen, shift, tipe) {
     const tanggalKerja = tanggal.slice(0, 10);
-    if (status_absen === 2 && Number(shift) === 3) {
+    if (status_absen === 2 && Number(shift) === 3 && tipe === 'HARI') {
         const prev = new Date(tanggalKerja + 'T00:00:00Z');
         prev.setUTCDate(prev.getUTCDate() - 1);
         return prev.toISOString().slice(0, 10);
@@ -31,9 +31,34 @@ function hitungTanggalKerja(tanggal, status_absen, shift) {
     return tanggalKerja;
 }
 
-// Usulan shift default dari jam server (WIB): 6-14 -> 1, 14-22 -> 2, sisanya -> 3
-function detectShift() {
+// Hanya jabatan ini yang memakai shift (unit 20). Ubah di sini jika ada jabatan baru.
+const SHIFT_JABATAN = ['25', '53', '65', '34', '59'];
+
+function isShiftEligible(jabat) {
+    return SHIFT_JABATAN.includes(String(jabat));
+}
+
+// Tipe hari dari tanggal WIB 'YYYY-MM-DD HH:mm:ss' atau 'YYYY-MM-DD'
+function tipeHari(tanggal) {
+    const d = new Date(tanggal.slice(0, 10) + 'T00:00:00Z');
+    const day = d.getUTCDay(); // 0=Minggu, 6=Sabtu
+    if (day === 0) return 'MINGGU';
+    if (day === 6) return 'SABTU';
+    return 'HARI';
+}
+
+// Usulan shift default dari jam server (WIB) per tipe hari
+function detectShift(tipe) {
     const jam = parseInt(waktuJakarta().slice(11, 13), 10);
+    if (tipe === 'SABTU_BORONGAN') {
+        if (jam >= 5 && jam < 14) return 1;
+        return 2;
+    }
+    if (tipe === 'SABTU') {
+        if (jam >= 5 && jam < 12) return 1;
+        if (jam >= 12 && jam < 17) return 2;
+        return 3;
+    }
     if (jam >= 6 && jam < 14) return 1;
     if (jam >= 14 && jam < 22) return 2;
     return 3;
@@ -73,14 +98,12 @@ function prosesAbsen(req, res, coba = false) {
     const latitude = req.body.latitude;
     const longitude = req.body.longitude;
     const status_absen = parseInt(req.body.status_absen, 10);
-    const shift = parseInt(req.body.shift, 10) || detectShift();
     const tanggal = waktuJakarta();
+    const tipe = tipeHari(tanggal);
 
     if (status_absen !== 1 && status_absen !== 2) {
         return res.status(400).json({ success: false, message: 'status_absen harus 1 (check-in) atau 2 (check-out)', code: 'status_invalid' });
     }
-
-    const kerja = hitungTanggalKerja(tanggal, status_absen, shift);
 
     pool.getConnection(function (err, connection) {
         if (err) {
@@ -92,98 +115,148 @@ function prosesAbsen(req, res, coba = false) {
             connection.release();
             res.status(400).json({ success: false, message: pesan, code: kode });
         };
-        const selesai = () => {
-            connection.release();
-            const body = { success: true, message: 'Berhasil absensi!', status_absen, shift, tanggal, tanggal_kerja: kerja };
-            if (coba) body.waktu_absensi = tanggal;
-            res.send(body);
-        };
 
-        const masukkan = () => {
-            connection.query(
-                `INSERT INTO tabsensi (kar_nik, tanggal, cus_kode, customer, kd_cabang, cabang, latitude, longitude, status_absen, shift)
-                 VALUES (?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?)`,
-                [kar_nik, tanggal, kd_cabang, latitude, longitude, status_absen, shift],
-                function (error) {
-                    if (error) {
-                        console.error(error);
-                        tolak('Terjadi kesalahan saat menyimpan absen', 'error');
-                        return;
-                    }
-                    selesai();
-                }
-            );
-        };
-
-        // Duplikat: maksimal 1 record per (kar_nik, tanggal_kerja, status_absen)
         connection.query(
-            'SELECT COUNT(*) AS jml FROM tabsensitampung WHERE kar_nik = ? AND tanggal_kerja = ? AND status_absen = ?',
-            [kar_nik, kerja, status_absen],
-            function (error, rows) {
-                if (error) {
-                    console.error(error);
-                    tolak('Terjadi kesalahan saat cek absen', 'error');
-                    return;
+            'SELECT kar_kd_jabat, kar_sistem_gaji FROM tkaryawan WHERE kar_nik = ? LIMIT 1',
+            [kar_nik],
+            function (err, kary) {
+                if (err) {
+                    console.error(err);
+                    return tolak('Terjadi kesalahan saat cek karyawan', 'error');
                 }
-                if (rows[0].jml > 0) {
-tolak(status_absen === 1
-                            ? 'Anda sudah Check In pada tanggal kerja ini'
-                            : 'Anda sudah Check Out pada tanggal kerja ini', 'duplicate');
-                    return;
+                if (!kary.length) {
+                    return tolak('Karyawan tidak ditemukan', 'error');
                 }
 
-                // Check-in cabang 20: harus dalam toleransi jam masuk shift
-                if (status_absen === 1 && String(kd_cabang) === '20') {
+                const jabat = kary[0].kar_kd_jabat;
+                const borongan = String(kary[0].kar_sistem_gaji || '').toLowerCase() === 'borongan';
+                const isShift = String(kd_cabang) === '20' && isShiftEligible(jabat) && tipe !== 'MINGGU';
+                const tipeShift = tipe === 'SABTU' && borongan ? 'SABTU_BORONGAN' : tipe;
+                const shift = isShift ? (parseInt(req.body.shift, 10) || detectShift(tipeShift)) : null;
+                const kerja = isShift
+                    ? hitungTanggalKerja(tanggal, status_absen, shift, tipeShift)
+                    : tanggal.slice(0, 10);
+
+                const selesai = () => {
+                    connection.release();
+                    const body = { success: true, message: 'Berhasil absensi!', status_absen, shift, tanggal, tanggal_kerja: kerja };
+                    if (coba) body.waktu_absensi = tanggal;
+                    res.send(body);
+                };
+
+                const masukkan = (shiftVal) => {
                     connection.query(
-                        `SELECT toleransi_mulai, toleransi_selesai FROM tshift WHERE kd_cabang = ? AND kd_shift = ?`,
-                        [String(kd_cabang), shift],
-                        function (error, shiftRows) {
+                        `INSERT INTO tabsensi (kar_nik, tanggal, cus_kode, customer, kd_cabang, cabang, latitude, longitude, status_absen, shift)
+                         VALUES (?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?)`,
+                        [kar_nik, tanggal, kd_cabang, latitude, longitude, status_absen, shiftVal],
+                        function (error) {
                             if (error) {
                                 console.error(error);
-                                tolak('Terjadi kesalahan saat cek shift', 'error');
-                                return;
+                                return tolak('Terjadi kesalahan saat menyimpan absen', 'error');
                             }
-                            if (!shiftRows.length) {
-                                tolak('Shift tidak dikenal', 'shift_unknown');
-                                return;
-                            }
-                            const jam = tanggal.slice(11);
-                            if (jam < shiftRows[0].toleransi_mulai || jam > shiftRows[0].toleransi_selesai) {
-                                tolak('Di luar jam masuk shift, pilih shift yang sesuai', 'shift_window');
-                                return;
-                            }
-                            masukkan();
+                            selesai();
                         }
                     );
-                } else {
-                    masukkan();
-                }
+                };
+
+                // Duplikat: maksimal 1 record per (kar_nik, tanggal_kerja, status_absen)
+                connection.query(
+                    'SELECT COUNT(*) AS jml FROM tabsensitampung WHERE kar_nik = ? AND tanggal_kerja = ? AND status_absen = ?',
+                    [kar_nik, kerja, status_absen],
+                    function (error, rows) {
+                        if (error) {
+                            console.error(error);
+                            return tolak('Terjadi kesalahan saat cek absen', 'error');
+                        }
+                        if (rows[0].jml > 0) {
+                            return tolak(status_absen === 1
+                                ? 'Anda sudah Check In pada tanggal kerja ini'
+                                : 'Anda sudah Check Out pada tanggal kerja ini', 'duplicate');
+                        }
+
+                        // Jalur shift: check-in wajib dalam toleransi jam masuk shift hari itu
+                        if (isShift) {
+                            if (status_absen === 1) {
+                                connection.query(
+                                    `SELECT toleransi_mulai, toleransi_selesai FROM tshift WHERE kd_cabang = ? AND kd_shift = ? AND tipe_hari = ?`,
+                                    [String(kd_cabang), shift, tipeShift],
+                                    function (error, shiftRows) {
+                                        if (error) {
+                                            console.error(error);
+                                            return tolak('Terjadi kesalahan saat cek shift', 'error');
+                                        }
+                                        if (!shiftRows.length) {
+                                            return tolak('Shift tidak dikenal', 'shift_unknown');
+                                        }
+                                        const jam = tanggal.slice(11);
+                                        if (jam < shiftRows[0].toleransi_mulai || jam > shiftRows[0].toleransi_selesai) {
+                                            return tolak('Di luar jam masuk shift, pilih shift yang sesuai', 'shift_window');
+                                        }
+                                        masukkan(shift);
+                                    }
+                                );
+                            } else {
+                                masukkan(shift);
+                            }
+                        } else {
+                            masukkan(null);
+                        }
+                    }
+                );
             }
         );
     });
 }
 
 module.exports = {
+    // Daftar shift hari ini untuk karyawan (POST). non_shift = karyawan bukan shift.
     getShiftDefault(req, res) {
-        const kd_cabang = req.query.kd_cabang || '20';
+        const kar_nik = req.body.kar_nik;
+        const kd_cabang = req.body.kd_cabang || '20';
+        const tanggal = waktuJakarta();
+        const tipe = tipeHari(tanggal);
+
+        const kirim = (hasil) => res.send({ success: true, ...hasil });
+
         pool.getConnection(function (err, connection) {
             if (err) throw err;
+
             connection.query(
-                `SELECT kd_shift, nm_shift,
-                    TIME_FORMAT(jam_mulai,"%H:%i") jam_mulai,
-                    TIME_FORMAT(jam_selesai,"%H:%i") jam_selesai,
-                    TIME_FORMAT(toleransi_mulai,"%H:%i") toleransi_mulai,
-                    TIME_FORMAT(toleransi_selesai,"%H:%i") toleransi_selesai
-                 FROM tshift WHERE kd_cabang = ? ORDER BY kd_shift`,
-                [String(kd_cabang)],
-                function (error, results) {
-                    if (error) throw error;
-                    res.send({
-                        success: true,
-                        data: results,
-                        default_shift: detectShift()
-                    });
-                    connection.release();
+                'SELECT kar_kd_jabat, kar_sistem_gaji FROM tkaryawan WHERE kar_nik = ? LIMIT 1',
+                [kar_nik],
+                function (err, kary) {
+                    if (err) { connection.release(); throw err; }
+                    if (!kary.length) {
+                        connection.release();
+                        kirim({ data: [], default_shift: null, non_shift: true });
+                        return;
+                    }
+
+                    const jabat = kary[0].kar_kd_jabat;
+                    const borongan = String(kary[0].kar_sistem_gaji || '').toLowerCase() === 'borongan';
+                    const isShift = String(kd_cabang) === '20' && isShiftEligible(jabat) && tipe !== 'MINGGU';
+
+                    if (!isShift) {
+                        connection.release();
+                        kirim({ data: [], default_shift: null, non_shift: true });
+                        return;
+                    }
+
+                    const tipeShift = tipe === 'SABTU' && borongan ? 'SABTU_BORONGAN' : tipe;
+                    connection.query(
+                        `SELECT kd_shift, nm_shift,
+                            TIME_FORMAT(jam_mulai,"%H:%i") jam_mulai,
+                            TIME_FORMAT(jam_selesai,"%H:%i") jam_selesai,
+                            TIME_FORMAT(toleransi_mulai,"%H:%i") toleransi_mulai,
+                            TIME_FORMAT(toleransi_selesai,"%H:%i") toleransi_selesai
+                         FROM tshift WHERE kd_cabang = ? AND tipe_hari = ? ORDER BY kd_shift`,
+                        [String(kd_cabang), tipeShift],
+                        function (error, results) {
+                            connection.release();
+                            if (error) throw error;
+                            kirim({ data: results, default_shift: detectShift(tipeShift), non_shift: false });
+                        }
+                    );
                 }
             );
         });
@@ -204,7 +277,7 @@ module.exports = {
             if (err) throw err;
 
             connection.query(
-                "SELECT kar_kd_unit FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
+                "SELECT kar_kd_unit, kar_kd_jabat FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
                 [kar_nama],
                 function (err, rows) {
                     if (err) throw err;
@@ -216,9 +289,10 @@ module.exports = {
                     }
 
                     let kd_unit = rows[0].kar_kd_unit;
+                    let isShiftUser = kd_unit == 20 && isShiftEligible(rows[0].kar_kd_jabat);
 
                     let sql, params;
-                    if (kd_unit == 20) {
+                    if (isShiftUser) {
                         sql = SQL_HISTORY_UNIT20 + ` WHERE Nama = ? ORDER BY Tanggal DESC LIMIT 10;`;
                         params = [kar_nama];
                     } else {
@@ -293,7 +367,7 @@ module.exports = {
             if (err) throw err;
 
             connection.query(
-                "SELECT kar_kd_unit, kar_nik FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
+                "SELECT kar_kd_unit, kar_kd_jabat, kar_nik FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
                 [kar_nama],
                 function (err, rows) {
                     if (err) throw err;
@@ -306,8 +380,9 @@ module.exports = {
 
                     let kd_unit = rows[0].kar_kd_unit;
                     let kar_nik = rows[0].kar_nik;
+                    let isShiftUser = kd_unit == 20 && isShiftEligible(rows[0].kar_kd_jabat) && currentHour >= 0 && tipeHari(today) !== 'MINGGU';
 
-                    if (kd_unit == 20) {
+                    if (isShiftUser) {
                         // Cabang 20 (3 shift): tampilkan sesi shift 3 (kerja = kemarin) yang masih
                         // terbuka sampai jam 14:00. Lewat 14:00 = reset ke hari ini (mulai shift 2).
                         let focus = today;
