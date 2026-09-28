@@ -553,8 +553,9 @@ module.exports = {
                     const kdUnit = results[0].kar_kd_unit;
                     const kdJabat = results[0].kar_kd_jabat;
 
-                    const allowedUnits = ['19', '22', '23', '24'];
-                    const isRotiqMobile = allowedUnits.includes(kdUnit) && kdJabat == '45';
+                    const allowedUnits = ['19', '22', '23', '24', '25', '27', '28'];
+                    const rotiqJabatan = ['45', '57'];
+                    const isRotiqMobile = allowedUnits.includes(kdUnit) && rotiqJabatan.includes(String(kdJabat));
 
                     if (isRotiqMobile) {
                         // Ambil daftar unit RotiQ
