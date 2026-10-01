@@ -93,9 +93,11 @@ const SESI_SESUDAHNYA_SQL = `
     LIMIT 1
 `;
 
-// Batas check-out berulang: maksimal 3x per sesi, maksimal 18 jam sejak check-in.
+// Batas check-out berulang: maksimal 3x per sesi.
+// Batas jam hanya berlaku untuk check-out kedua ke atas (koreksi tap sebelumnya).
+// Check-out pertama tidak dibatasi jam, karena shift normal 8 jam dan ada yang lembur.
 const MAX_CHECK_OUT = 3;
-const MAKS_JAM_CHECK_OUT = 18;
+const MAKS_JAM_CHECK_OUT = 10;
 
 function sesiTerakhir(kar_nik, shift) {
     return new Promise((resolve, reject) => {
@@ -130,11 +132,15 @@ function sesiTerakhirDari(rows) {
     };
 }
 
-// Terima atau tolak check-out berulang.
-// - tidak ada check-in  -> tolak (harus check in dulu)
-// - sudah MAX_CHECK_OUT -> tolak
-// - lewat MAKS_JAM_CHECK_OUT jam sejak check-in -> tolak
-function bolehCheckOutUlang(sesi, sekarang) {
+// Terima atau tolak check-out.
+// - tidak ada check-in       -> tolak (harus check in dulu)
+// - sudah MAX_CHECK_OUT      -> tolak
+// - sudah pernah check-out dan lewat MAKS_JAM_CHECK_OUT jam -> tolak
+//
+// Batas jam sengaja hanya untuk check-out kedua ke atas. Check-out pertama tidak
+// dibatasi karena shift normal 8 jam dan sebagian orang lembur lebih dari 10 jam -
+// membatasinya membuat mereka tidak bisa pulang sama sekali.
+function bolehCheckOut(sesi, sekarang) {
     if (!sesi || !sesi.checkInPertama) {
         return { ok: false, kode: 'no_open_session', pesan: 'Belum ada Check In pada shift ini' };
     }
@@ -145,13 +151,15 @@ function bolehCheckOutUlang(sesi, sekarang) {
             pesan: `Check Out sudah dicatat ${MAX_CHECK_OUT} kali, tidak bisa diubah lagi`,
         };
     }
-    const jam = (sekarang.getTime() - sesi.checkInPertama.getTime()) / 3600000;
-    if (jam > MAKS_JAM_CHECK_OUT) {
-        return {
-            ok: false,
-            kode: 'checkout_expired',
-            pesan: `Check Out hanya bisa diubah dalam ${MAKS_JAM_CHECK_OUT} jam setelah Check In`,
-        };
+    if (sesi.jumlahCheckOut > 0) {
+        const jam = (sekarang.getTime() - sesi.checkInPertama.getTime()) / 3600000;
+        if (jam > MAKS_JAM_CHECK_OUT) {
+            return {
+                ok: false,
+                kode: 'checkout_expired',
+                pesan: `Check Out hanya bisa diubah dalam ${MAKS_JAM_CHECK_OUT} jam setelah Check In`,
+            };
+        }
     }
     return { ok: true, perbaikan: sesi.jumlahCheckOut > 0 };
 }
@@ -260,12 +268,17 @@ function prosesAbsen(req, res, coba = false) {
                         const toleransi = shiftRows.length ? shiftRows[0].toleransi_selesai : null;
                         const terlambat = status_absen === 1 && cekTerlambat(shift, jam, toleransi);
 
-                        // Check-out memakai tanggal kerja sesi check-in terakhir pada shift ini
-                        // (bikin shift 3 malam 23:00-07:00 terhitung satu hari kerja).
-                        // Sesi yang sudah tertutup tetap boleh ditutup lagi sampai batas 3x / 18 jam.
-                        if (status_absen === 2) {
+                        // Check-out.
+                        //
+                        // Cabang 20: pakai sesi check-in terakhir pada shift ini, supaya shift 3
+                        // malam (23:00-07:00) terhitung satu hari kerja, dan supaya sesi yang
+                        // sudah tertutup masih bisa ditutup lagi (batas 3x / 10 jam koreksi).
+                        //
+                        // Cabang selain 20: data historisnya tidak punya tanggal_kerja maupun
+                        // shift, jadi pakai tanggal hari ini - seperti sebelum fitur shift ada.
+                        if (status_absen === 2 && isShift) {
                             return sesiTerakhir(kar_nik, shift).then((sesi) => {
-                                const cek = bolehCheckOutUlang(sesi, new Date(tanggal.replace(' ', 'T')));
+                                const cek = bolehCheckOut(sesi, new Date(tanggal.replace(' ', 'T')));
                                 if (!cek.ok) return tolak(cek.pesan, cek.kode);
                                 lanjut(sesi.tanggalKerja, cek.perbaikan);
                             }, () => tolak('Terjadi kesalahan saat cek sesi', 'error'));
@@ -275,7 +288,7 @@ function prosesAbsen(req, res, coba = false) {
 
                         function lanjut(kerja, perbaikan) {
                             // Duplikat. Check-in tetap maksimal sekali; check-out boleh berulang
-                            // sampai batas MAX_CHECK_OUT (sudah divalidasi di bolehCheckOutUlang).
+                            // sampai batas MAX_CHECK_OUT (sudah divalidasi di bolehCheckOut).
                             if (status_absen === 1) {
                                 connection.query(
                                     `SELECT COUNT(*) AS jml FROM tabsensitampung
@@ -400,7 +413,7 @@ module.exports = {
     _test: {
         SESI_SESUDAHNYA_SQL,
         sesiTerakhirDari,
-        bolehCheckOutUlang,
+        bolehCheckOut,
         cekTerlambat,
         resolveShift,
         detectShift,
@@ -524,7 +537,7 @@ module.exports = {
                     if (isShiftUser) {
                         // Cabang 20: sesi 7 hari terakhir per (tanggal_kerja, shift).
                         // check_out_shift = shift yang punya Check In (boleh ditutup lagi kalau
-                        // masih dalam batas 3x / 18 jam). open_shift = yang belum ditutup.
+                        // masih dalam batas 3x / 10 jam koreksi). open_shift = yang belum ditutup.
                         connection.query(
                             SQL_HISTORY_UNIT20 + ` WHERE Nama = ? AND Tanggal >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 7 DAY), "%Y-%m-%d") ORDER BY Tanggal ASC, shift ASC;`,
                             [kar_nama],
