@@ -68,51 +68,92 @@ function detectShift(tipe, jamServer, borongan) {
     return 3;
 }
 
-// Sesi check-in yang belum ditutup pada shift tertentu, hanya untuk hari ini/kemarin.
-// Kalau tidak ada, tanggal kerja untuk check-out adalah hari ini.
-const SESI_TERBUKA_SQL = `
-    SELECT DATE_FORMAT(tanggal_kerja, "%Y-%m-%d") tanggal_kerja
-    FROM tabsensitampung x
-    WHERE x.kar_nik = ? AND COALESCE(x.shift, 0) = ? AND x.status_absen = 1
-      AND x.tanggal_kerja >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), "%Y-%m-%d")
-      AND NOT EXISTS (
-          SELECT 1 FROM tabsensitampung y
-          WHERE y.kar_nik = x.kar_nik
-            AND COALESCE(y.shift, 0) = x.shift
-            AND y.tanggal_kerja = x.tanggal_kerja
-            AND y.status_absen = 2)
-    ORDER BY x.tanggal_kerja DESC
+// Sesi check-in terakhir pada shift tertentu (hari ini/kemarin), beserta jam check-in
+// pertamanya dan jumlah check-out yang sudah tercatat.
+//
+// Dihitung dari tabsensi (log mentah), bukan tabsensitampung: tabel cermin punya
+// PRIMARY KEY (kar_nik, tanggal, status_absen) sehingga dua check-out di detik yang sama
+// saling menimpa dan tidak bisa dipakai menghitung jumlah tap.
+const SESI_SESUDAHNYA_SQL = `
+    SELECT
+        DATE_FORMAT(rani.tanggal_kerja, "%Y-%m-%d") tanggal_kerja,
+        (SELECT MIN(tanggal) FROM tabsensi
+         WHERE kar_nik = rani.kar_nik AND COALESCE(shift, 0) = COALESCE(rani.shift, 0)
+           AND tanggal_kerja = rani.tanggal_kerja AND status_absen = 1) check_in_pertama,
+        (SELECT COUNT(*) FROM tabsensi
+         WHERE kar_nik = rani.kar_nik AND COALESCE(shift, 0) = COALESCE(rani.shift, 0)
+           AND tanggal_kerja = rani.tanggal_kerja AND status_absen = 2) jumlah_check_out,
+        (SELECT MAX(tanggal) FROM tabsensi
+         WHERE kar_nik = rani.kar_nik AND COALESCE(shift, 0) = COALESCE(rani.shift, 0)
+           AND tanggal_kerja = rani.tanggal_kerja AND status_absen = 2) check_out_terakhir
+    FROM tabsensi rani
+    WHERE rani.kar_nik = ? AND COALESCE(rani.shift, 0) = ? AND rani.status_absen = 1
+      AND rani.tanggal_kerja >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), "%Y-%m-%d")
+    ORDER BY rani.tanggal_kerja DESC, rani.tanggal DESC
     LIMIT 1
 `;
 
-function sesiTerbuka(kar_nik, shift) {
+// Batas check-out berulang: maksimal 3x per sesi, maksimal 18 jam sejak check-in.
+const MAX_CHECK_OUT = 3;
+const MAKS_JAM_CHECK_OUT = 18;
+
+function sesiTerakhir(kar_nik, shift) {
     return new Promise((resolve, reject) => {
         pool.getConnection((err, connection) => {
             if (err) return reject(err);
-            connection.query(SESI_TERBUKA_SQL, [kar_nik, shift], (error, rows) => {
+            connection.query(SESI_SESUDAHNYA_SQL, [kar_nik, shift], (error, rows) => {
                 connection.release();
                 if (error) return reject(error);
-                resolve(rows.length ? rows[0].tanggal_kerja : null);
+                if (!rows.length) return resolve(null);
+                const r = rows[0];
+                resolve({
+                    tanggalKerja: r.tanggal_kerja,
+                    checkInPertama: r.check_in_pertama,
+                    jumlahCheckOut: r.jumlah_check_out,
+                    checkOutTerakhir: r.check_out_terakhir,
+                });
             });
         });
     });
 }
 
-// Versi pure dari sesiTerbuka, untuk diuji tanpa database.
-// rows harus sudah difilter ke satu shift.
-function sesiTerbukaDari(rows) {
-    const tertutup = new Set(rows.filter((r) => r.status_absen === 2).map((r) => r.tanggal_kerja));
-    const terbuka = rows
-        .filter((r) => r.status_absen === 1 && !tertutup.has(r.tanggal_kerja))
-        .sort((a, b) => (a.tanggal_kerja < b.tanggal_kerja ? 1 : -1));
-    return terbuka.length ? terbuka[0].tanggal_kerja : null;
+// Versi pure dari sesiTerakhir, untuk diuji tanpa database.
+// rows harus sudah difilter ke satu shift dan satu tanggal_kerja.
+function sesiTerakhirDari(rows) {
+    if (!rows.length) return null;
+    const masuk = rows.filter((r) => r.status_absen === 1).map((r) => r.tanggal).sort();
+    const keluar = rows.filter((r) => r.status_absen === 2).map((r) => r.tanggal).sort();
+    return {
+        checkInPertama: masuk[0] || null,
+        jumlahCheckOut: keluar.length,
+        checkOutTerakhir: keluar[keluar.length - 1] || null,
+    };
 }
 
-// Tanggal kerja untuk check-out: ikut sesi check-in yang masih terbuka.
-// Inilah yang bikin shift 3 malam (check-in 23:00, check-out 07:00) terhitung
-// satu hari kerja, tanpa aturan shift khusus.
-function tanggalKerjaCheckOut(rows, hariIni) {
-    return sesiTerbukaDari(rows) || hariIni;
+// Terima atau tolak check-out berulang.
+// - tidak ada check-in  -> tolak (harus check in dulu)
+// - sudah MAX_CHECK_OUT -> tolak
+// - lewat MAKS_JAM_CHECK_OUT jam sejak check-in -> tolak
+function bolehCheckOutUlang(sesi, sekarang) {
+    if (!sesi || !sesi.checkInPertama) {
+        return { ok: false, kode: 'no_open_session', pesan: 'Belum ada Check In pada shift ini' };
+    }
+    if (sesi.jumlahCheckOut >= MAX_CHECK_OUT) {
+        return {
+            ok: false,
+            kode: 'max_check_out',
+            pesan: `Check Out sudah dicatat ${MAX_CHECK_OUT} kali, tidak bisa diubah lagi`,
+        };
+    }
+    const jam = (sekarang.getTime() - sesi.checkInPertama.getTime()) / 3600000;
+    if (jam > MAKS_JAM_CHECK_OUT) {
+        return {
+            ok: false,
+            kode: 'checkout_expired',
+            pesan: `Check Out hanya bisa diubah dalam ${MAKS_JAM_CHECK_OUT} jam setelah Check In`,
+        };
+    }
+    return { ok: true, perbaikan: sesi.jumlahCheckOut > 0 };
 }
 
 // Toleransi tidak menolak absen - hanya menandai terlambat.
@@ -140,7 +181,7 @@ const SQL_HISTORY_UNIT20 = `
             COALESCE(a.shift, 0) shift,
             COALESCE(s.nm_shift, "Day Shift") shift_name,
             (SELECT DATE_FORMAT(tanggal,"%H:%i:%s") FROM tabsensitampung WHERE status_absen=1 AND kar_nik=a.kar_nik AND tanggal_kerja=a.tanggal_kerja AND COALESCE(shift,0)=COALESCE(a.shift,0) ORDER BY tanggal LIMIT 1) _IN,
-            (SELECT DATE_FORMAT(tanggal,"%H:%i:%s") FROM tabsensitampung WHERE status_absen=2 AND kar_nik=a.kar_nik AND tanggal_kerja=a.tanggal_kerja AND COALESCE(shift,0)=COALESCE(a.shift,0) ORDER BY tanggal LIMIT 1) _OUT,
+            (SELECT DATE_FORMAT(tanggal,"%H:%i:%s") FROM tabsensitampung WHERE status_absen=2 AND kar_nik=a.kar_nik AND tanggal_kerja=a.tanggal_kerja AND COALESCE(shift,0)=COALESCE(a.shift,0) ORDER BY tanggal DESC LIMIT 1) _OUT,
             IF(
                 COALESCE(a.shift, 0) = 0 OR s.toleransi_selesai IS NULL,
                 IF((SELECT TIME_FORMAT(MIN(tanggal), "%H:%i:%s") FROM tabsensitampung WHERE status_absen=1 AND kar_nik=a.kar_nik AND tanggal_kerja=a.tanggal_kerja AND COALESCE(shift,0)=COALESCE(a.shift,0)) > "08:01:00", 1, 0),
@@ -219,60 +260,69 @@ function prosesAbsen(req, res, coba = false) {
                         const toleransi = shiftRows.length ? shiftRows[0].toleransi_selesai : null;
                         const terlambat = status_absen === 1 && cekTerlambat(shift, jam, toleransi);
 
-                        // Check-out memakai tanggal kerja sesi check-in yang masih terbuka
-                        // pada shift ini (bikin shift 3 malam 23:00-07:00 terhitung satu hari kerja).
+                        // Check-out memakai tanggal kerja sesi check-in terakhir pada shift ini
+                        // (bikin shift 3 malam 23:00-07:00 terhitung satu hari kerja).
+                        // Sesi yang sudah tertutup tetap boleh ditutup lagi sampai batas 3x / 18 jam.
                         if (status_absen === 2) {
-                            return sesiTerbuka(kar_nik, shift).then((tgl) => {
-                                if (!tgl) return tolak('Belum ada Check In pada shift ini', 'no_open_session');
-                                lanjut(tgl);
+                            return sesiTerakhir(kar_nik, shift).then((sesi) => {
+                                const cek = bolehCheckOutUlang(sesi, new Date(tanggal.replace(' ', 'T')));
+                                if (!cek.ok) return tolak(cek.pesan, cek.kode);
+                                lanjut(sesi.tanggalKerja, cek.perbaikan);
                             }, () => tolak('Terjadi kesalahan saat cek sesi', 'error'));
                         }
 
-                        lanjut(tanggal.slice(0, 10));
+                        lanjut(tanggal.slice(0, 10), false);
 
-                        function lanjut(kerja) {
-                            // Duplikat: maksimal 1 record per (kar_nik, tanggal_kerja, shift, status_absen)
-                            connection.query(
-                                `SELECT COUNT(*) AS jml FROM tabsensitampung
-                                 WHERE kar_nik = ? AND tanggal_kerja = ? AND COALESCE(shift,0) = ? AND status_absen = ?`,
-                                [kar_nik, kerja, shift, status_absen],
-                                function (error, rows) {
-                                    if (error) {
-                                        console.error(error);
-                                        return tolak('Terjadi kesalahan saat cek absen', 'error');
-                                    }
-                                    if (rows[0].jml > 0) {
-                                        return tolak(status_absen === 1
-                                            ? 'Anda sudah Check In pada shift ini'
-                                            : 'Anda sudah Check Out pada shift ini', 'duplicate');
-                                    }
-
-                                    connection.query(
-                                        `INSERT INTO tabsensi (kar_nik, tanggal, cus_kode, customer, kd_cabang, cabang, latitude, longitude, status_absen, shift, tanggal_kerja)
-                                         VALUES (?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)`,
-                                        [kar_nik, tanggal, kd_cabang, latitude, longitude, status_absen, shift, kerja],
-                                        function (error) {
-                                            if (error) {
-                                                console.error(error);
-                                                return tolak('Terjadi kesalahan saat menyimpan absen', 'error');
-                                            }
-                                            connection.release();
-                                            const body = {
-                                                success: true,
-                                                message: 'Berhasil absensi!',
-                                                status_absen,
-                                                shift,
-                                                shift_name: shift ? undefined : 'Day Shift',
-                                                terlambat,
-                                                tanggal,
-                                                tanggal_kerja: kerja,
-                                            };
-                                            if (coba) body.waktu_absensi = tanggal;
-                                            res.send(body);
+                        function lanjut(kerja, perbaikan) {
+                            // Duplikat. Check-in tetap maksimal sekali; check-out boleh berulang
+                            // sampai batas MAX_CHECK_OUT (sudah divalidasi di bolehCheckOutUlang).
+                            if (status_absen === 1) {
+                                connection.query(
+                                    `SELECT COUNT(*) AS jml FROM tabsensitampung
+                                     WHERE kar_nik = ? AND tanggal_kerja = ? AND COALESCE(shift,0) = ? AND status_absen = ?`,
+                                    [kar_nik, kerja, shift, status_absen],
+                                    function (error, rows) {
+                                        if (error) {
+                                            console.error(error);
+                                            return tolak('Terjadi kesalahan saat cek absen', 'error');
                                         }
-                                    );
-                                }
-                            );
+                                        if (rows[0].jml > 0) {
+                                            return tolak('Anda sudah Check In pada shift ini', 'duplicate');
+                                        }
+                                        simpan();
+                                    }
+                                );
+                            } else {
+                                simpan();
+                            }
+
+                            function simpan() {
+                                connection.query(
+                                    `INSERT INTO tabsensi (kar_nik, tanggal, cus_kode, customer, kd_cabang, cabang, latitude, longitude, status_absen, shift, tanggal_kerja)
+                                     VALUES (?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)`,
+                                    [kar_nik, tanggal, kd_cabang, latitude, longitude, status_absen, shift, kerja],
+                                    function (error) {
+                                        if (error) {
+                                            console.error(error);
+                                            return tolak('Terjadi kesalahan saat menyimpan absen', 'error');
+                                        }
+                                        connection.release();
+                                        const body = {
+                                            success: true,
+                                            message: 'Berhasil absensi!',
+                                            status_absen,
+                                            shift,
+                                            shift_name: shift ? undefined : 'Day Shift',
+                                            terlambat,
+                                            perbaikan: !!perbaikan,
+                                            tanggal,
+                                            tanggal_kerja: kerja,
+                                        };
+                                        if (coba) body.waktu_absensi = tanggal;
+                                        res.send(body);
+                                    }
+                                );
+                            }
                         }
                     }
                 );
@@ -348,14 +398,16 @@ module.exports = {
 
     // Fungsi murni untuk test/absensi.test.js
     _test: {
-        SESI_TERBUKA_SQL,
-        sesiTerbukaDari,
-        tanggalKerjaCheckOut,
+        SESI_SESUDAHNYA_SQL,
+        sesiTerakhirDari,
+        bolehCheckOutUlang,
         cekTerlambat,
-      resolveShift,
-      detectShift,
-      tipeShiftDari,
-      TOLERANSI_DAY,
+        resolveShift,
+        detectShift,
+        tipeShiftDari,
+        TOLERANSI_DAY,
+        MAX_CHECK_OUT,
+        MAKS_JAM_CHECK_OUT,
     },
 
     historyAbsensi(req, res) {
@@ -398,7 +450,7 @@ module.exports = {
                                     FROM tabsensitampung
                                     WHERE status_absen=2 AND kar_nik=a.kar_nik
                                     AND DATE_FORMAT(tanggal,"%Y-%m-%d") = DATE_FORMAT(a.tanggal,"%Y-%m-%d")
-                                    LIMIT 1) _OUT
+                                    ORDER BY tanggal DESC LIMIT 1) _OUT
                                 FROM tabsensitampung a
                                 INNER JOIN tkaryawan b ON a.kar_nik=b.kar_nik
                             ) FINAL
@@ -470,8 +522,9 @@ module.exports = {
                     let isShiftUser = String(kd_unit) === KD_CABANG_SHIFT;
 
                     if (isShiftUser) {
-                        // Cabang 20: sesi 7 hari terakhir per (tanggal_kerja, shift), plus sesi
-                        // yang masih terbuka supaya client bisa menentukan tombol aktif tanpa menebak.
+                        // Cabang 20: sesi 7 hari terakhir per (tanggal_kerja, shift).
+                        // check_out_shift = shift yang punya Check In (boleh ditutup lagi kalau
+                        // masih dalam batas 3x / 18 jam). open_shift = yang belum ditutup.
                         connection.query(
                             SQL_HISTORY_UNIT20 + ` WHERE Nama = ? AND Tanggal >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 7 DAY), "%Y-%m-%d") ORDER BY Tanggal ASC, shift ASC;`,
                             [kar_nama],
@@ -479,7 +532,8 @@ module.exports = {
                                 if (error) throw error;
                                 connection.release();
 
-                                const terbuka = results.filter((r) => r._IN && !r._OUT);
+                                const denganMasuk = results.filter((r) => r._IN);
+                                const terbuka = denganMasuk.filter((r) => !r._OUT);
                                 const open = terbuka.length ? terbuka[terbuka.length - 1] : null;
 
                                 res.send({
@@ -489,9 +543,9 @@ module.exports = {
                                     workDate: open ? open.Tanggal : today,
                                     current_hour: currentHour,
                                     shift: open ? Number(open.shift) : null,
-                                    // Sesi yang akan ditutup kalau user tekan Check Out.
                                     open_shift: terbuka.map((r) => Number(r.shift)),
                                     open_work_date: terbuka.map((r) => r.Tanggal),
+                                    check_out_shift: denganMasuk.map((r) => Number(r.shift)),
                                     data: results
                                 });
                             }
@@ -512,7 +566,7 @@ module.exports = {
                                     FROM tabsensitampung
                                     WHERE status_absen=2 AND kar_nik=a.kar_nik
                                     AND DATE_FORMAT(tanggal,"%Y-%m-%d") = DATE_FORMAT(a.tanggal,"%Y-%m-%d")
-                                    LIMIT 1) _OUT
+                                    ORDER BY tanggal DESC LIMIT 1) _OUT
                                 FROM tabsensitampung a
                                 INNER JOIN tkaryawan b ON a.kar_nik=b.kar_nik
                             ) FINAL
@@ -522,7 +576,8 @@ module.exports = {
                             function (error, results) {
                                 if (error) throw error;
                                 connection.release();
-                                const terbuka = results.filter((r) => r._IN && !r._OUT);
+                                const denganMasuk = results.filter((r) => r._IN);
+                                const terbuka = denganMasuk.filter((r) => !r._OUT);
                                 res.send({
                                     success: true,
                                     message: 'Berhasil ambil data hari ini!',
@@ -531,6 +586,7 @@ module.exports = {
                                     current_hour: currentHour,
                                     open_shift: terbuka.map((r) => Number(r.shift ?? 0)),
                                     open_work_date: terbuka.map(() => today),
+                                    check_out_shift: denganMasuk.map((r) => Number(r.shift ?? 0)),
                                     data: results
                                 });
                             }
