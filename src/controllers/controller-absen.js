@@ -29,6 +29,57 @@ const SHIFT_DAY = 0;
 // Ambang check-in Day Shift, dipakai saat tidak ada jadwal shift yang berlaku.
 const TOLERANSI_DAY = '08:01:00';
 
+// Radius jangkauan absen, meter. Jarak GPS HP ke titik unit di tunit harus di bawah ini.
+const RADIUS_JANGKAUAN = 500;
+
+// Jarak dua titik bumi (meter), haversine. radius bumi 6371 km.
+function jarakMeter(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad;
+    const dLon = (lon2 - lon1) * rad;
+    const a = Math.sin(dLat / 2) ** 2
+        + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Parse koordinat yang mungkin datang sebagai string atau null.
+// tunit.latitude/longitude bertipe varchar, jadi harus di-cast.
+function koordinatAngka(nilai) {
+    const n = parseFloat(nilai);
+    return Number.isFinite(n) ? n : null;
+}
+
+// Validasi lokasi check-in/check-out terhadap titik absen di tunit.
+// - unit tanpa koordinat  -> lewati, unitnya tidak bisa dikunci
+// - koordinat HP tidak valid -> tolak, kalau dilewati tinggal(absen tanpa koordinat
+// - jarak >= radius        -> tolak
+function cekJangkauan(latHp, lngHp, latUnit, lngUnit, radius = RADIUS_JANGKAUAN) {
+    const la = koordinatAngka(latHp);
+    const ln = koordinatAngka(lngHp);
+    if (la === null || ln === null) {
+        return { ok: false, kode: 'koordinat_invalid', pesan: 'Lokasi GPS tidak terbaca, pastikan lokasi HP aktif' };
+    }
+    if (la === 0 && ln === 0) {
+        return { ok: false, kode: 'koordinat_invalid', pesan: 'Lokasi GPS belum siap, coba beberapa saat lagi' };
+    }
+
+    const ua = koordinatAngka(latUnit);
+    const un = koordinatAngka(lngUnit);
+    // tunit tanpa koordinat: tidak ada titik acuan, jadi tidak bisa dinilai.
+    if (ua === null || un === null || (ua === 0 && un === 0)) return { ok: true };
+
+    const jarak = jarakMeter(la, ln, ua, un);
+    if (jarak >= radius) {
+        return {
+            ok: false,
+            kode: 'out_of_range',
+            pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
+        };
+    }
+    return { ok: true, jarak };
+}
+
 // Tipe hari dari tanggal WIB 'YYYY-MM-DD HH:mm:ss' atau 'YYYY-MM-DD'
 function tipeHari(tanggal) {
     const d = new Date(tanggal.slice(0, 10) + 'T00:00:00Z');
@@ -231,7 +282,9 @@ function prosesAbsen(req, res, coba = false) {
         };
 
         connection.query(
-            'SELECT kar_kd_unit, kar_sistem_gaji FROM tkaryawan WHERE kar_nik = ? LIMIT 1',
+            `SELECT k.kar_kd_unit, k.kar_sistem_gaji, u.latitude lat_unit, u.longitude lng_unit
+             FROM tkaryawan k LEFT JOIN tunit u ON u.kd_unit = k.kar_kd_unit
+             WHERE k.kar_nik = ? LIMIT 1`,
             [kar_nik],
             function (err, kary) {
                 if (err) {
@@ -254,6 +307,13 @@ function prosesAbsen(req, res, coba = false) {
                     : SHIFT_DAY;
 
                 const jam = tanggal.slice(11);
+
+                // Validasi lokasi sebelum validasi lain: orang yang di luar jangkauan
+                // tidak boleh membakar jatah check-out berulang cuma untuk ditolak.
+                const jangkauan = cekJangkauan(latitude, longitude, kary[0].lat_unit, kary[0].lng_unit);
+                if (!jangkauan.ok) {
+                    return tolak(jangkauan.pesan, jangkauan.kode);
+                }
 
                 // Toleransi hanya menandai terlambat, tidak menolak.
                 connection.query(
@@ -414,6 +474,9 @@ module.exports = {
         SESI_SESUDAHNYA_SQL,
         sesiTerakhirDari,
         bolehCheckOut,
+        jarakMeter,
+        cekJangkauan,
+        RADIUS_JANGKAUAN,
         cekTerlambat,
         resolveShift,
         detectShift,
