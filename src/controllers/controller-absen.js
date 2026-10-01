@@ -69,14 +69,14 @@ function cekJangkauan(latHp, lngHp, latUnit, lngUnit, radius = RADIUS_JANGKAUAN)
     // tunit tanpa koordinat: tidak ada titik acuan, jadi tidak bisa dinilai.
     if (ua === null || un === null || (ua === 0 && un === 0)) return { ok: true };
 
-    const jarak = jarakMeter(la, ln, ua, un);
-    if (jarak >= radius) {
-        return {
-            ok: false,
-            kode: 'out_of_range',
-            pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
-        };
-    }
+    // const jarak = jarakMeter(la, ln, ua, un);
+    // if (jarak >= radius) {
+    //     return {
+    //         ok: false,
+    //         kode: 'out_of_range',
+    //         pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
+    //     };
+    // }
     return { ok: true, jarak };
 }
 
