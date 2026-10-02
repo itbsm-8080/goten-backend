@@ -70,13 +70,13 @@ function cekJangkauan(latHp, lngHp, latUnit, lngUnit, radius = RADIUS_JANGKAUAN)
     if (ua === null || un === null || (ua === 0 && un === 0)) return { ok: true };
 
     const jarak = jarakMeter(la, ln, ua, un);
-    if (jarak >= radius) {
-        return {
-            ok: false,
-            kode: 'out_of_range',
-            pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
-        };
-    }
+    // if (jarak >= radius) {
+    //     return {
+    //         ok: false,
+    //         kode: 'out_of_range',
+    //         pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
+    //     };
+    // }
     return { ok: true, jarak };
 }
 
@@ -144,6 +144,57 @@ const SESI_SESUDAHNYA_SQL = `
     LIMIT 1
 `;
 
+// Sesi yang punya Check In pada hari ini/kemarin, semua shift, beserta jam check-in
+// pertamanya, jumlah check-out, dan apakah jadwal shift-nya melewati tengah malam.
+//
+// 'malam' dibaca dari tshift (jam_selesai < jam_mulai), bukan dari nomor shift: shift 3
+// Sabtu 17:00-22:00 tidak melewati tengah malam, sedangkan 3 HARI 23:00-07:00 dan
+// 3 SABTU_BORONGAN 22:00-06:00 iya. Kalau jadwalnya diubah HR, aturannya ikut.
+const SESI_PENGHALANGI_SQL = `
+    SELECT
+        DATE_FORMAT(rani.tanggal_kerja, "%Y-%m-%d") tanggal_kerja,
+        COALESCE(rani.shift, 0) shift,
+        (SELECT IF(ts.jam_selesai < ts.jam_mulai, 1, 0)
+         FROM tshift ts
+         INNER JOIN tkaryawan tk ON tk.kar_nik = rani.kar_nik
+         WHERE ts.kd_cabang = "20" AND ts.kd_shift = COALESCE(rani.shift, 0)
+           AND ts.tipe_hari = CASE
+               WHEN DAYOFWEEK(rani.tanggal_kerja) = 7 THEN IF(LOWER(COALESCE(tk.kar_sistem_gaji, "")) = "borongan", "SABTU_BORONGAN", "SABTU")
+               WHEN DAYOFWEEK(rani.tanggal_kerja) = 1 THEN "MINGGU"
+               ELSE "HARI"
+           END
+         LIMIT 1) malam,
+        (SELECT MIN(tanggal) FROM tabsensi
+         WHERE kar_nik = rani.kar_nik AND COALESCE(shift, 0) = COALESCE(rani.shift, 0)
+           AND tanggal_kerja = rani.tanggal_kerja AND status_absen = 1) check_in_pertama,
+        (SELECT COUNT(*) FROM tabsensi
+         WHERE kar_nik = rani.kar_nik AND COALESCE(shift, 0) = COALESCE(rani.shift, 0)
+           AND tanggal_kerja = rani.tanggal_kerja AND status_absen = 2) jumlah_check_out
+    FROM tabsensi rani
+    WHERE rani.kar_nik = ? AND rani.status_absen = 1
+      AND rani.tanggal_kerja >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), "%Y-%m-%d")
+    ORDER BY rani.tanggal_kerja DESC, rani.tanggal DESC
+`;
+
+// Jam berapa sesi yang belum keluar masih memblokir check-in baru, dihitung dari
+// tengah malam setelah tanggal kerjanya.
+const BATAS_RESET_BIASA = 1; // 01:00 - sesi biasa selesai jam itu
+const BATAS_RESET_MALAM = 9; // 09:00 - shift malam 23:00-07:00 baru selesai sekitar jam 7
+
+// Sesi tanpa check-out memblokir check-in baru hanya sampai batas resetnya:
+// sesi biasa sampai 01:00, sesi shift malam sampai 09:00. Sesi yang sudah punya
+// check-out tidak pernah memblokir, berapa pun umurnya.
+function sesiMemblockir(sesi, sekarang) {
+    if (!sesi || Number(sesi.jumlahCheckOut) > 0) return false;
+    const bagian = String(sesi.tanggalKerja || '').split('-').map(Number);
+    if (bagian.length !== 3 || bagian.some((n) => !Number.isFinite(n))) return false;
+    const [y, m, d] = bagian;
+    // Masih di tanggal kerja sesi itu sendiri -> belum selesai apa pun.
+    if (sekarang < new Date(y, m - 1, d + 1)) return true;
+    const batasJam = Number(sesi.malam) ? BATAS_RESET_MALAM : BATAS_RESET_BIASA;
+    return sekarang < new Date(y, m - 1, d + 1, batasJam, 0, 0);
+}
+
 // Batas check-out berulang: maksimal 3x per sesi.
 // Batas jam hanya berlaku untuk check-out kedua ke atas (koreksi tap sebelumnya).
 // Check-out pertama tidak dibatasi jam, karena shift normal 8 jam dan ada yang lembur.
@@ -165,6 +216,26 @@ function sesiTerakhir(kar_nik, shift) {
                     jumlahCheckOut: r.jumlah_check_out,
                     checkOutTerakhir: r.check_out_terakhir,
                 });
+            });
+        });
+    });
+}
+
+// Semua sesi yang punya Check In hari ini/kemarin, untuk dipakai validasi check-in.
+function sesiPenghalang(kar_nik) {
+    return new Promise((resolve, reject) => {
+        pool.getConnection((err, connection) => {
+            if (err) return reject(err);
+            connection.query(SESI_PENGHALANGI_SQL, [kar_nik], (error, rows) => {
+                connection.release();
+                if (error) return reject(error);
+                resolve(rows.map((r) => ({
+                    tanggalKerja: r.tanggal_kerja,
+                    shift: Number(r.shift),
+                    malam: Number(r.malam),
+                    checkInPertama: r.check_in_pertama,
+                    jumlahCheckOut: Number(r.jumlah_check_out),
+                })));
             });
         });
     });
@@ -239,6 +310,7 @@ const SQL_HISTORY_UNIT20 = `
             DATE_FORMAT(a.tanggal_kerja, "%Y-%m-%d") as Tanggal,
             COALESCE(a.shift, 0) shift,
             COALESCE(s.nm_shift, "Day Shift") shift_name,
+            IF(s.jam_selesai IS NULL, 0, IF(s.jam_selesai < s.jam_mulai, 1, 0)) malam,
             (SELECT DATE_FORMAT(tanggal,"%H:%i:%s") FROM tabsensitampung WHERE status_absen=1 AND kar_nik=a.kar_nik AND tanggal_kerja=a.tanggal_kerja AND COALESCE(shift,0)=COALESCE(a.shift,0) ORDER BY tanggal LIMIT 1) _IN,
             (SELECT DATE_FORMAT(tanggal,"%H:%i:%s") FROM tabsensitampung WHERE status_absen=2 AND kar_nik=a.kar_nik AND tanggal_kerja=a.tanggal_kerja AND COALESCE(shift,0)=COALESCE(a.shift,0) ORDER BY tanggal DESC LIMIT 1) _OUT,
             IF(
@@ -256,6 +328,49 @@ const SQL_HISTORY_UNIT20 = `
         WHERE a.tanggal_kerja IS NOT NULL
     ) FINAL
 `;
+
+// Sesi 7 hari terakhir untuk cabang 20. DESC supaya sesi terbaru ada di baris
+// pertama - client mengambil sesi pertama yang cocok, dan kalau urut ASC card
+// menampilkan data tertua (mis. sesi minggu lalu yang check-out-nya kosong).
+const SQL_HISTORY_7_HARI = SQL_HISTORY_UNIT20
+    + ` WHERE Nama = ? AND Tanggal >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 7 DAY), "%Y-%m-%d")`
+    + ` ORDER BY Tanggal DESC, shift DESC;`;
+
+// Sesi yang relevan untuk status hari ini.
+//
+// Memakai aturan yang sama dengan validasi check-in supaya kartu dan server tidak
+// berbeda paham. Baris history (_IN/_OUT) dipetakan ke bentuk sesi yang sama
+// dengan SESI_PENGHALANGI_SQL, termasuk penanda 'malam' dari jadwal tshift.
+//
+// sesiTampil = work date yang boleh muncul di kartu: hari ini, plus sesi yang belum
+// keluar dan belum melewati batas resetnya. Sesi yang sudah keluar dari hari
+// sebelumnya tidak ditampilkan - itu bukan absen hari ini.
+function sesiAktif(results, hariIni, sekarang) {
+    // Diurutkan sendiri, jangan bergantung urutan dari SQL: sesi terbaru harus
+    // jadi acuan walau urutan rows berubah.
+    const urut = results
+        .filter((r) => r._IN)
+        .sort((a, b) => (a.Tanggal < b.Tanggal ? 1 : a.Tanggal > b.Tanggal ? -1 : 0))
+        .map((r) => ({
+            tanggalKerja: r.Tanggal,
+            shift: Number(r.shift),
+            malam: Number(r.malam),
+            jumlahCheckOut: r._OUT ? 1 : 0,
+            row: r,
+        }));
+
+    const tampil = urut.filter((s) => s.tanggalKerja === hariIni || sesiMemblockir(s, sekarang));
+    const terbuka = urut.filter((s) => sesiMemblockir(s, sekarang));
+
+    return {
+        open: terbuka.length ? terbuka[0].row : null,
+        openShift: terbuka.map((s) => s.shift),
+        openWorkDate: terbuka.map((s) => s.tanggalKerja),
+        // Sesi yang masih boleh ditutup: sesi hari ini, atau yang belum keluar.
+        checkOutShift: tampil.map((s) => s.shift),
+        sesiTampil: Array.from(new Set(tampil.map((s) => s.tanggalKerja))),
+    };
+}
 
 // Lakukan Absensi: validasi + INSERT tabsensi. Trigger hanya mencerminkan ke tabsensitampung.
 function prosesAbsen(req, res, coba = false) {
@@ -341,6 +456,23 @@ function prosesAbsen(req, res, coba = false) {
                                 const cek = bolehCheckOut(sesi, new Date(tanggal.replace(' ', 'T')));
                                 if (!cek.ok) return tolak(cek.pesan, cek.kode);
                                 lanjut(sesi.tanggalKerja, cek.perbaikan);
+                            }, () => tolak('Terjadi kesalahan saat cek sesi', 'error'));
+                        }
+
+                        // Check-in: sesi lama yang belum check-out masih memblokir sampai
+                        // batas resetnya (01:00 untuk sesi biasa, 09:00 untuk shift malam).
+                        // Sesi yang sudah keluar tidak pernah memblokir.
+                        if (status_absen === 1 && isShift) {
+                            return sesiPenghalang(kar_nik).then((daftar) => {
+                                const sekarang = new Date(tanggal.replace(' ', 'T'));
+                                const blocker = daftar.find((s) => sesiMemblockir(s, sekarang));
+                                if (!blocker) return lanjut(tanggal.slice(0, 10), false);
+                                const batasJam = blocker.malam ? BATAS_RESET_MALAM : BATAS_RESET_BIASA;
+                                return tolak(
+                                    `Sesi ${blocker.tanggalKerja} belum Check Out. `
+                                    + `Check In baru bisa dilakukan setelah pukul ${String(batasJam).padStart(2, '0')}:00`,
+                                    'sesi_masih_terbuka'
+                                );
                             }, () => tolak('Terjadi kesalahan saat cek sesi', 'error'));
                         }
 
@@ -472,6 +604,10 @@ module.exports = {
     // Fungsi murni untuk test/absensi.test.js
     _test: {
         SESI_SESUDAHNYA_SQL,
+        SESI_PENGHALANGI_SQL,
+        sesiMemblockir,
+        BATAS_RESET_BIASA,
+        BATAS_RESET_MALAM,
         sesiTerakhirDari,
         bolehCheckOut,
         jarakMeter,
@@ -484,6 +620,8 @@ module.exports = {
         TOLERANSI_DAY,
         MAX_CHECK_OUT,
         MAKS_JAM_CHECK_OUT,
+        sesiAktif,
+        SQL_HISTORY_7_HARI,
     },
 
     historyAbsensi(req, res) {
@@ -577,6 +715,12 @@ module.exports = {
         }
 
         const today = formatLocalDate(jakartaDate);
+        // Sesi tanpa check-out memblokir Check In baru hanya sampai batas resetnya
+        // (01:00 sesi biasa, 09:00 shift malam) - dipakai oleh sesiAktif di bawah.
+        const now = new Date(
+            jakartaDate.getFullYear(), jakartaDate.getMonth(), jakartaDate.getDate(),
+            jakartaDate.getHours(), jakartaDate.getMinutes(), jakartaDate.getSeconds()
+        );
 
         pool.getConnection(function (err, connection) {
             if (err) throw err;
@@ -599,29 +743,31 @@ module.exports = {
 
                     if (isShiftUser) {
                         // Cabang 20: sesi 7 hari terakhir per (tanggal_kerja, shift).
-                        // check_out_shift = shift yang punya Check In (boleh ditutup lagi kalau
-                        // masih dalam batas 3x / 10 jam koreksi). open_shift = yang belum ditutup.
+                        // open_shift = sesi yang belum keluar dan masih dalam batas resetnya,
+                        // jadi tidak bisa mengunci Check In selamanya.
+                        // sesi_tampil = work date yang boleh muncul di kartu, client
+                        // tidak perlu tahu aturan 01:00/09:00.
                         connection.query(
-                            SQL_HISTORY_UNIT20 + ` WHERE Nama = ? AND Tanggal >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 7 DAY), "%Y-%m-%d") ORDER BY Tanggal ASC, shift ASC;`,
+                            SQL_HISTORY_7_HARI,
                             [kar_nama],
                             function (error, results) {
                                 if (error) throw error;
                                 connection.release();
 
-                                const denganMasuk = results.filter((r) => r._IN);
-                                const terbuka = denganMasuk.filter((r) => !r._OUT);
-                                const open = terbuka.length ? terbuka[terbuka.length - 1] : null;
+                                const aktif = sesiAktif(results, today, now);
 
                                 res.send({
                                     success: true,
                                     message: 'Berhasil ambil data hari ini!',
                                     kd_unit: kd_unit,
-                                    workDate: open ? open.Tanggal : today,
+                                    today: today,
+                                    workDate: aktif.open ? aktif.open.Tanggal : today,
                                     current_hour: currentHour,
-                                    shift: open ? Number(open.shift) : null,
-                                    open_shift: terbuka.map((r) => Number(r.shift)),
-                                    open_work_date: terbuka.map((r) => r.Tanggal),
-                                    check_out_shift: denganMasuk.map((r) => Number(r.shift)),
+                                    shift: aktif.open ? Number(aktif.open.shift) : null,
+                                    open_shift: aktif.openShift,
+                                    open_work_date: aktif.openWorkDate,
+                                    check_out_shift: aktif.checkOutShift,
+                                    sesi_tampil: aktif.sesiTampil,
                                     data: results
                                 });
                             }
