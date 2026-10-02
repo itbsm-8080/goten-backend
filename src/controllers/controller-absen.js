@@ -70,13 +70,13 @@ function cekJangkauan(latHp, lngHp, latUnit, lngUnit, radius = RADIUS_JANGKAUAN)
     if (ua === null || un === null || (ua === 0 && un === 0)) return { ok: true };
 
     const jarak = jarakMeter(la, ln, ua, un);
-    // if (jarak >= radius) {
-    //     return {
-    //         ok: false,
-    //         kode: 'out_of_range',
-    //         pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
-    //     };
-    // }
+    if (jarak >= radius) {
+        return {
+            ok: false,
+            kode: 'out_of_range',
+            pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
+        };
+    }
     return { ok: true, jarak };
 }
 
@@ -804,11 +804,16 @@ module.exports = {
                                     success: true,
                                     message: 'Berhasil ambil data hari ini!',
                                     kd_unit: kd_unit,
+                                    today: today,
                                     workDate: today,
                                     current_hour: currentHour,
                                     open_shift: terbuka.map((r) => Number(r.shift ?? 0)),
                                     open_work_date: terbuka.map(() => today),
                                     check_out_shift: denganMasuk.map((r) => Number(r.shift ?? 0)),
+                                    // Sama seperti cabang 20: client hanya menampilkan sesi yang
+                                    // ada di daftar ini. Tanpa field ini, kartu di web dan
+                                    // Flutter kosong untuk semua cabang selain 20.
+                                    sesi_tampil: denganMasuk.map((r) => r.Tanggal),
                                     data: results
                                 });
                             }
