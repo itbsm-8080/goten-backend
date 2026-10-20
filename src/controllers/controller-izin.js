@@ -557,11 +557,16 @@ module.exports = {
                     const rotiqJabatan = ['45', '57', '47'];
                     const isRotiqMobile = allowedUnits.includes(kdUnit) && rotiqJabatan.includes(String(kdJabat));
 
-                    if (isRotiqMobile) {
-                        // Ambil daftar unit RotiQ
+                    // Akunting (jabat 72) di unit pusat 18 boleh absen di semua cabang PT Bumi Sarana Maju.
+                    const isAkunting = String(kdUnit) === '18' && String(kdJabat) === '72';
+
+                    if (isRotiqMobile || isAkunting) {
+                        const filterUnit = isAkunting
+                            ? `nm_unit2 = 'PT BUMI SARANA MAJU'`
+                            : `nm_unit LIKE '%RotiQ%'`;
                         connection.query(
-                            `SELECT kd_unit, nm_unit, latitude, longitude FROM tunit 
-                         WHERE nm_unit LIKE '%RotiQ%' ORDER BY nm_unit`,
+                            `SELECT kd_unit, nm_unit, nm_unit2, latitude, longitude FROM tunit 
+                         WHERE ${filterUnit} ORDER BY kd_unit`,
                             function (err2, units) {
                                 connection.release();
                                 if (err2) {
@@ -569,7 +574,8 @@ module.exports = {
                                 } else {
                                     res.send({
                                         success: true,
-                                        is_rotiq_mobile: true,
+                                        is_rotiq_mobile: isRotiqMobile,
+                                        is_akunting: isAkunting,
                                         units: units
                                     });
                                 }

@@ -397,10 +397,20 @@ function prosesAbsen(req, res, coba = false) {
         };
 
         connection.query(
-            `SELECT k.kar_kd_unit, k.kar_sistem_gaji, u.latitude lat_unit, u.longitude lng_unit
-             FROM tkaryawan k LEFT JOIN tunit u ON u.kd_unit = k.kar_kd_unit
+            // Akunting (unit 18, jabat 72) boleh absen lintas cabang BSM: kalau client
+            // kirim kd_unit cabang BSM yang sah (nm_unit2 = 'PT BUMI SARANA MAJU'),
+            // titik acuan validasi jadi cabang itu (p), bukan unit asal (u).
+            // Gate identity di ON clause, bukan di sini, supaya request kd_unit dari
+            // karyawan lain tidak bisa mengganti titik acuan.
+            `SELECT k.kar_kd_unit, k.kar_sistem_gaji,
+                    COALESCE(p.latitude, u.latitude) lat_unit,
+                    COALESCE(p.longitude, u.longitude) lng_unit
+             FROM tkaryawan k
+             LEFT JOIN tunit u ON u.kd_unit = k.kar_kd_unit
+             LEFT JOIN tunit p ON k.kar_kd_unit = '18' AND k.kar_kd_jabat = '72'
+                       AND p.kd_unit = ? AND p.nm_unit2 = 'PT BUMI SARANA MAJU'
              WHERE k.kar_nik = ? LIMIT 1`,
-            [kar_nik],
+            [req.body.kd_unit || '', kar_nik],
             function (err, kary) {
                 if (err) {
                     console.error(err);
