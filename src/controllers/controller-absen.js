@@ -6,6 +6,8 @@ pool.on('error', (err) => {
     console.error(err);
 });
 
+const rotiq = require('../services/rotiq');
+
 // Waktu saat ini di Asia/Jakarta, format 'YYYY-MM-DD HH:mm:ss'
 function waktuJakarta() {
     return new Date().toLocaleString("en-CA", {
@@ -29,8 +31,16 @@ const SHIFT_DAY = 0;
 // Ambang check-in Day Shift, dipakai saat tidak ada jadwal shift yang berlaku.
 const TOLERANSI_DAY = '08:01:00';
 
-// Radius jangkauan absen, meter. Jarak GPS HP ke titik unit di tunit harus di bawah ini.
-const RADIUS_JANGKAUAN = 500;
+// Radius jangkauan absen, meter. Nilai asli ada di tunit.radius_absen; ini
+// cadangan kalau kolomnya kosong atau data unit tidak ketemu.
+const RADIUS_JANGKAUAN = 25;
+
+// Penolakan jarak ditahan sampai aplikasi yang mengirim kd_unit RotiQ tersebar.
+// Versi sebelumnya memakai unit asal sebagai acuan, jadi bisa menolak absen sah.
+// off = hitung saja, log = catat, block = tolak.
+function modeRadiusAbsen() {
+    return (process.env.ABSEN_RADIUS_MODE || 'off').toLowerCase();
+}
 
 // Jarak dua titik bumi (meter), haversine. radius bumi 6371 km.
 function jarakMeter(lat1, lon1, lat2, lon2) {
@@ -70,13 +80,14 @@ function cekJangkauan(latHp, lngHp, latUnit, lngUnit, radius = RADIUS_JANGKAUAN)
     if (ua === null || un === null || (ua === 0 && un === 0)) return { ok: true };
 
     const jarak = jarakMeter(la, ln, ua, un);
-    // if (jarak >= radius) {
-    //     return {
-    //         ok: false,
-    //         kode: 'out_of_range',
-    //         pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
-    //     };
-    // }
+    if (jarak >= radius) {
+        return {
+            ok: false,
+            kode: 'out_of_range',
+            pesan: `Di luar jangkauan ${radius} meter dari titik absen (jarak ${Math.round(jarak)} meter)`,
+            jarak,
+        };
+    }
     return { ok: true, jarak };
 }
 
@@ -397,18 +408,18 @@ function prosesAbsen(req, res, coba = false) {
         };
 
         connection.query(
-            // Akunting (unit 18, jabat 72) boleh absen lintas cabang BSM: kalau client
-            // kirim kd_unit cabang BSM yang sah (nm_unit2 = 'PT BUMI SARANA MAJU'),
-            // titik acuan validasi jadi cabang itu (p), bukan unit asal (u).
-            // Gate identity di ON clause, bukan di sini, supaya request kd_unit dari
-            // karyawan lain tidak bisa mengganti titik acuan.
+            // Titik acuan absen: unit asal (u), atau unit pilihan client (p) kalau
+            // karyawannya berhak - RotiQ boleh pindah unit, akunting boleh pindah
+            // cabang BSM. Syarat hak akses ada di ON clause, bukan di sini, supaya
+            // kd_unit dari karyawan lain tidak bisa mengganti titik acuan.
+            // Radius ikut unit acuan, jadi tiap lokasi bisa beda.
             `SELECT k.kar_kd_unit, k.kar_sistem_gaji,
                     COALESCE(p.latitude, u.latitude) lat_unit,
-                    COALESCE(p.longitude, u.longitude) lng_unit
+                    COALESCE(p.longitude, u.longitude) lng_unit,
+                    COALESCE(p.radius_absen, u.radius_absen, ${RADIUS_JANGKAUAN}) radius_unit
              FROM tkaryawan k
              LEFT JOIN tunit u ON u.kd_unit = k.kar_kd_unit
-             LEFT JOIN tunit p ON k.kar_kd_unit = '18' AND k.kar_kd_jabat = '72'
-                       AND p.kd_unit = ? AND p.nm_unit2 = 'PT BUMI SARANA MAJU'
+             LEFT JOIN tunit p ON p.kd_unit = ? AND ${rotiq.syaratUnitPilihan('p')}
              WHERE k.kar_nik = ? LIMIT 1`,
             [req.body.kd_unit || '', kar_nik],
             function (err, kary) {
@@ -435,9 +446,18 @@ function prosesAbsen(req, res, coba = false) {
 
                 // Validasi lokasi sebelum validasi lain: orang yang di luar jangkauan
                 // tidak boleh membakar jatah check-out berulang cuma untuk ditolak.
-                const jangkauan = cekJangkauan(latitude, longitude, kary[0].lat_unit, kary[0].lng_unit);
+                const radiusUnit = Number(kary[0].radius_unit) || RADIUS_JANGKAUAN;
+                const jangkauan = cekJangkauan(latitude, longitude, kary[0].lat_unit, kary[0].lng_unit, radiusUnit);
                 if (!jangkauan.ok) {
-                    return tolak(jangkauan.pesan, jangkauan.kode);
+                    // Koordinat rusak selalu ditolak. Jarak hanya ditolak kalau
+                    // mode-nya sudah block.
+                    const mode = modeRadiusAbsen();
+                    if (jangkauan.kode !== 'out_of_range' || mode === 'block') {
+                        return tolak(jangkauan.pesan, jangkauan.kode);
+                    }
+                    if (mode === 'log') {
+                        console.log(`[radius] ${kar_nik} ${Math.round(jangkauan.jarak)}m > ${radiusUnit}m`);
+                    }
                 }
 
                 // Toleransi hanya menandai terlambat, tidak menolak.

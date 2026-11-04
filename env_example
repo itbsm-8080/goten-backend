@@ -5,3 +5,18 @@ DB_PASSWORD=password
 DB_PORT=3306
 PORT=8080
 NODE_ENV=production
+
+# Gate versi aplikasi mobile.
+# off   = semua lolos, log = catat yang di bawah minimum, block = tolak 426.
+VERSION_GATE_MODE=off
+# Versi terendah yang masih boleh dipakai. Samakan dengan versionCode rilis terbaru.
+MIN_APP_VERSION_CODE=0
+# Link APK yang dikirim di respons 426.
+APK_URL=http://103.103.22.7/cutikaryawan/apk/goten-release-6.apk
+
+# Penolakan jarak absen. Radius per unit dibaca dari tunit.radius_absen.
+# off   = jarak hanya dihitung, absen tetap lolos
+# log   = yang di luar radius dicatat, tetap lolos
+# block = yang di luar radius ditolak
+# Biarkan off sampai aplikasi yang mengirim kd_unit RotiQ tersebar.
+ABSEN_RADIUS_MODE=off

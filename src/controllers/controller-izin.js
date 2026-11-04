@@ -6,6 +6,10 @@ pool.on('error', (err) => {
     console.error(err);
 });
 
+const approval = require('./controller-approval');
+const { unitApprover } = require('../services/approval_unit');
+const rotiq = require('../services/rotiq');
+
 const NOMERATOR = 'TIJ';
 const NOMERATOR_TIJ = 'IJN';
 
@@ -130,9 +134,9 @@ module.exports = {
                 pool.getConnection(function (err, connection) {
                     if (err) return;
                     connection.query(
-                        `SELECT tkaryawan.kar_nama FROM tuser 
-             INNER JOIN tkaryawan ON tuser.kar_nik = tkaryawan.kar_nik 
-             WHERE tuser.kd_unit = ?`,
+                        `SELECT tkaryawan.kar_nama FROM tusernew 
+             INNER JOIN tkaryawan ON tusernew.kar_nik = tkaryawan.kar_nik 
+             WHERE tusernew.kd_unit = ?`,
                         [kd_unit],
                         function (error, approvers) {
                             connection.release();
@@ -213,33 +217,9 @@ module.exports = {
         });
     },
 
-    // Cek apakah karyawan punya role approval
+    // Cek role approval. Sumber approver ada di tunit.ut_kar_nik, bukan tuser.
     cekRoleApproval(req, res) {
-        let { kar_nik } = req.body;
-
-        pool.getConnection(function (err, connection) {
-            if (err) throw err;
-            connection.query(
-                `SELECT kd_unit FROM tuser WHERE kar_nik = ?`,
-                [kar_nik],
-                function (error, results) {
-                    connection.release();
-                    if (error) {
-                        res.send({ success: false, is_approver: false });
-                    } else if (results.length > 0) {
-                        // Kumpulkan semua kd_unit
-                        const kdUnits = results.map(r => r.kd_unit.toString());
-                        res.send({
-                            success: true,
-                            is_approver: true,
-                            kd_units: kdUnits  // array, bukan string tunggal
-                        });
-                    } else {
-                        res.send({ success: true, is_approver: false });
-                    }
-                }
-            );
-        });
+        approval.cekRole(req, res);
     },
 
     // Get list izin untuk approval (berdasarkan kd_unit)
@@ -259,8 +239,6 @@ module.exports = {
             return;
         }
 
-        console.log("Sini" + unitsArray);
-
         // Buat placeholder ? sebanyak unit
         const placeholders = unitsArray.map(() => '?').join(',');
 
@@ -279,26 +257,32 @@ module.exports = {
             sql += ` AND date(tijintampung.tanggal) <= ?`;
             params.push(end_date);
         }
-        if (status && status !== 'ALL') {
-            sql += ` AND tijintampung.ij_status = ?`;
-            params.push(status);
+        const filterStatus = approval.filterStatusIzin(status);
+        if (filterStatus) {
+            sql += ` AND ${filterStatus}`;
         }
 
         sql += ` ORDER BY tijintampung.tanggal DESC`;
 
         pool.getConnection(function (err, connection) {
-            if (err) throw err;
+            if (err) {
+                res.send({ success: false, message: 'Database error' });
+                return;
+            }
             connection.query(sql, params, function (error, results) {
-                if (error) throw error;
+                connection.release();
+                if (error) {
+                    res.send({ success: false, message: 'Query error' });
+                    return;
+                }
                 res.send({ success: true, message: 'Berhasil!', data: results });
             });
-            connection.release();
         });
     },
 
     // ACCEPT / REJECT izin
     prosesIzin(req, res) {
-        let { ij_nomor, ij_status } = req.body;
+        let { ij_nomor, ij_status, kar_nik } = req.body;
 
         if (ij_status !== 'ACCEPT' && ij_status !== 'REJECT') {
             res.send({ success: false, message: 'Status tidak valid' });
@@ -309,7 +293,7 @@ module.exports = {
             if (err) throw err;
 
             // Update status di tijintampung
-            connection.query(
+            const updateStatus = () => connection.query(
                 `UPDATE tijintampung SET ij_status = ? WHERE ij_nomor = ?`,
                 [ij_status, ij_nomor],
                 function (error, results) {
@@ -383,6 +367,39 @@ module.exports = {
                         connection.release();
                         res.send({ success: true, message: 'Izin ditolak' });
                     }
+                }
+            );
+
+            if (!kar_nik) {
+                updateStatus();
+                return;
+            }
+
+            // Approver hanya boleh memproses izin karyawan di unit yang dia pegang.
+            connection.query(
+                `SELECT tkaryawan.kar_kd_unit
+                 FROM tijintampung
+                 INNER JOIN tkaryawan ON tijintampung.kar_nik = tkaryawan.kar_nik
+                 WHERE tijintampung.ij_nomor = ?
+                 LIMIT 1`,
+                [ij_nomor],
+                function (errCari, rows) {
+                    if (errCari || !rows.length) {
+                        connection.release();
+                        res.send({ success: false, message: 'Data izin tidak ditemukan' });
+                        return;
+                    }
+
+                    unitApprover(connection, kar_nik, function (errUnit, units) {
+                        const berwenang = !errUnit
+                            && units.some((u) => String(u.kd_unit) === String(rows[0].kar_kd_unit ?? ''));
+                        if (!berwenang) {
+                            connection.release();
+                            res.send({ success: false, message: 'Anda tidak berwenang menyetujui unit ini' });
+                            return;
+                        }
+                        updateStatus();
+                    });
                 }
             );
         });
@@ -553,19 +570,16 @@ module.exports = {
                     const kdUnit = results[0].kar_kd_unit;
                     const kdJabat = results[0].kar_kd_jabat;
 
-                    const allowedUnits = ['19', '22', '23', '24', '25', '27', '28'];
-                    const rotiqJabatan = ['45', '57', '47'];
-                    const isRotiqMobile = allowedUnits.includes(kdUnit) && rotiqJabatan.includes(String(kdJabat));
-
+                    const isRotiqMobile = rotiq.isRotiQMobile(kdUnit, kdJabat);
                     // Akunting (jabat 72) di unit pusat 18 boleh absen di semua cabang PT Bumi Sarana Maju.
-                    const isAkunting = String(kdUnit) === '18' && String(kdJabat) === '72';
+                    const isAkunting = rotiq.isAkunting(kdUnit, kdJabat);
 
                     if (isRotiqMobile || isAkunting) {
                         const filterUnit = isAkunting
-                            ? `nm_unit2 = 'PT BUMI SARANA MAJU'`
-                            : `nm_unit LIKE '%RotiQ%'`;
+                            ? `nm_unit2 = '${rotiq.NM_UNIT2_BSM}'`
+                            : `nm_unit LIKE '${rotiq.NM_UNIT_ROTIQ}'`;
                         connection.query(
-                            `SELECT kd_unit, nm_unit, nm_unit2, latitude, longitude FROM tunit 
+                            `SELECT kd_unit, nm_unit, nm_unit2, latitude, longitude, radius_absen FROM tunit 
                          WHERE ${filterUnit} ORDER BY kd_unit`,
                             function (err2, units) {
                                 connection.release();

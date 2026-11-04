@@ -10,7 +10,9 @@ app.use(cors());
 app.use(bodyParser.urlencoded({ extended: false, limit: '10mb' }));
 app.use(bodyParser.json({ limit: '10mb' }));
 
+const cekVersi = require('../src/middlewares/cek_versi');
 const appRoute = require('../src/routes/route');
+app.use(cekVersi);
 app.use('/', appRoute);
 
 module.exports = app;

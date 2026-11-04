@@ -20,6 +20,7 @@ const {
 
 const { izin } = require('../controllers');
 const { pod } = require('../controllers');
+const { approval } = require('../controllers');
 
 
 
@@ -81,6 +82,11 @@ router.post('/izin/proses', izin.prosesIzin);
 router.post('/izin/sisa-cuti', izin.getSisaCuti);
 router.post('/izin/cek-rotiq-mobile', izin.cekRotiQMobile);
 router.post('/izin/laporan', izin.getLaporanIzin);
+
+// Approval: role dari tunit.ut_kar_nik, izin dari tijintampung, lembur dari tlemburtampung
+router.post('/approval/cek-role', approval.cekRole);
+router.post('/lembur/approval-list', approval.getLemburApproval);
+router.post('/lembur/proses', approval.prosesLembur);
 
 // Proof of Delivery
 router.post('/pod/list', pod.getPOD);

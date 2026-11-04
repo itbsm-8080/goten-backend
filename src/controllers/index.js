@@ -6,6 +6,7 @@ const statistik = require('./controller-statistik');
 const auth = require('./controller-auth');
 const izin = require('./controller-izin');
 const pod = require('./controller-pod');
+const approval = require('./controller-approval');
 
 module.exports = {
 	karyawan,
@@ -15,5 +16,6 @@ module.exports = {
 	statistik,
 	auth,
 	izin,
-	pod
+	pod,
+	approval
 };
