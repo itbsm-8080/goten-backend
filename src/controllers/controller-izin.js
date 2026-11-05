@@ -309,8 +309,11 @@ module.exports = {
                         return;
                     }
 
-                    // Jika ACCEPT, insert ke tijin
+                    // Salinan ke tijin sudah dibuat oleh trigger DB saat ij_status
+                    // berubah menjadi ACCEPT. INSERT di sini dulu ikut menyalin,
+                    // jadi tijin berisi dua baris untuk satu pengajuan.
                     if (ij_status === 'ACCEPT') {
+                        /*
                         // Ambil data dari tijintampung
                         connection.query(
                             `SELECT * FROM tijintampung WHERE ij_nomor = ?`,
@@ -334,7 +337,7 @@ module.exports = {
 
                                     // Insert ke tijin
                                     connection.query(
-                                        `INSERT INTO tijin (ij_nomor, kar_nik, tanggal, alasan, keterangan, ij_foto, ij_shift) 
+                                        `INSERT INTO tijin (ij_nomor, kar_nik, tanggal, alasan, keterangan, ij_foto, ij_shift)
                                      VALUES (?, ?, ?, ?, ?, ?, ?)`,
                                         [
                                             newNomor,
@@ -362,6 +365,9 @@ module.exports = {
                                 });
                             }
                         );
+                        */
+                        connection.release();
+                        res.send({ success: true, message: 'Izin diterima' });
                     } else {
                         // REJECT — cuma update status
                         connection.release();
