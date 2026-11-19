@@ -4,8 +4,42 @@
 // (titik acuan validasi jarak). Daftarnya sengaja di satu tempat supaya kedua
 // controller tidak berbeda diam-diam.
 
+// yang dibawah ini memakai shift untuk unit RotiQ
+//kasir = penjaga toko, kasir, kru toko = 22, 47, 45 = dua shift 06.00 - 14.00, 13.00 - 21.00
+//pengiriman = pengiriman = 21 = dua shift 07.00 - 12.00, 16.00 - 19.00, dua kali absen
+
 const UNIT_ROTIQ = ['19', '22', '23', '24', '25', '27', '28'];
-const JABATAN_ROTIQ = ['45', '57', '47'];
+const JABATAN_KASIR = ['22', '47', '45'];
+const JABATAN_PRODUKSI = ['43', '46', '48'];
+const JABATAN_DRIVER = '21';
+const JABATAN_ROTIQ = [JABATAN_DRIVER, ...JABATAN_KASIR, ...JABATAN_PRODUKSI];
+const UNIT_ROTIQ_SQL = UNIT_ROTIQ.map((u) => `'${u}'`).join(',');
+const JABATAN_KASIR_SQL = JABATAN_KASIR.map((j) => `'${j}'`).join(',');
+
+function kategoriShift(kdUnit, kdJabat) {
+    if (!UNIT_ROTIQ.includes(String(kdUnit))) return null;
+    const jabat = String(kdJabat);
+    if (jabat === JABATAN_DRIVER) return 'driver';
+    if (JABATAN_KASIR.includes(jabat)) return 'kasir';
+    return null;
+}
+
+function isShiftRotiQ(kdUnit, kdJabat) {
+    return kategoriShift(kdUnit, kdJabat) !== null;
+}
+
+function tipeJadwalSql(tgl, k) {
+    return `CASE
+        WHEN ${k}.kar_kd_unit IN (${UNIT_ROTIQ_SQL}) AND ${k}.kar_kd_jabat = '${JABATAN_DRIVER}'
+            THEN 'HARI_DRIVER'
+        WHEN ${k}.kar_kd_unit IN (${UNIT_ROTIQ_SQL}) AND ${k}.kar_kd_jabat IN (${JABATAN_KASIR_SQL})
+            THEN 'HARI'
+        WHEN DAYOFWEEK(${tgl}) = 1 THEN 'MINGGU'
+        WHEN DAYOFWEEK(${tgl}) = 7
+            THEN IF(LOWER(COALESCE(${k}.kar_sistem_gaji, '')) = 'borongan', 'SABTU_BORONGAN', 'SABTU')
+        ELSE 'HARI'
+    END`;
+}
 
 // Akunting pusat: boleh absen di cabang BSM mana pun.
 const UNIT_AKUNTING = '18';
@@ -48,6 +82,12 @@ function syaratUnitPilihan(alias = 'p') {
 module.exports = {
     UNIT_ROTIQ,
     JABATAN_ROTIQ,
+    JABATAN_KASIR,
+    JABATAN_DRIVER,
+    JABATAN_PRODUKSI,
+    kategoriShift,
+    isShiftRotiQ,
+    tipeJadwalSql,
     UNIT_AKUNTING,
     JABATAN_AKUNTING,
     NM_UNIT2_BSM,

@@ -1,5 +1,6 @@
 const config = require('../configs/database');
 const mysql = require('mysql');
+const rotiq = require('../services/rotiq');
 const pool = mysql.createPool(config);
 
 pool.on('error', (err) => {
@@ -47,11 +48,7 @@ const SQL_STATISTIK = `
                 END terlambat
             FROM tabsensitampung a
             INNER JOIN tkaryawan b ON a.kar_nik = b.kar_nik
-            LEFT JOIN tshift s ON s.kd_cabang = '20' AND s.kd_shift = COALESCE(a.shift, 0) AND s.tipe_hari = CASE
-                WHEN DAYOFWEEK(a.tanggal_kerja) = 7 THEN IF(LOWER(COALESCE(b.kar_sistem_gaji, '')) = 'borongan', 'SABTU_BORONGAN', 'SABTU')
-                WHEN DAYOFWEEK(a.tanggal_kerja) = 1 THEN 'MINGGU'
-                ELSE 'HARI'
-            END
+            LEFT JOIN tshift s ON s.kd_cabang = b.kar_kd_unit AND s.kd_shift = COALESCE(a.shift, 0) AND s.tipe_hari = ${rotiq.tipeJadwalSql('a.tanggal_kerja', 'b')}
             WHERE a.tanggal_kerja IS NOT NULL
               AND a.status_absen = 1
         ) SESI

@@ -22,8 +22,21 @@ function waktuJakarta() {
     }).replace(',', '');
 }
 
-// Hanya cabang 20 yang memakai shift. Jabatan tidak dibatasi.
 const KD_CABANG_SHIFT = '20';
+const JABATAN_DRIVER = rotiq.JABATAN_DRIVER;
+const SHIFT_SORE = 2;
+
+function unitRotiQ(kdUnit) {
+  return rotiq.UNIT_ROTIQ.includes(String(kdUnit));
+}
+
+function pakaiShift(kdUnit, kdJabat) {
+  return String(kdUnit) === KD_CABANG_SHIFT || rotiq.isShiftRotiQ(kdUnit, kdJabat);
+}
+
+function driverRotiQ(kdUnit, kdJabat) {
+  return unitRotiQ(kdUnit) && String(kdJabat) === JABATAN_DRIVER;
+}
 
 // Shift 0 = Day Shift (absensi biasa, tanpa jadwal jam).
 const SHIFT_DAY = 0;
@@ -101,7 +114,10 @@ function tipeHari(tanggal) {
 }
 
 // Jadwal hari ini untuk tipe_hari yang berlaku (borongan -> SABTU_BORONGAN)
-function tipeShiftDari(tipe, borongan) {
+function tipeShiftDari(tipe, borongan, driver, kategori) {
+    if (driver) return 'HARI_DRIVER';
+    if (kategori === 'kasir') return 'HARI';
+    if (tipe === 'MINGGU') return tipe;
     return tipe === 'SABTU' && borongan ? 'SABTU_BORONGAN' : tipe;
 }
 
@@ -168,12 +184,8 @@ const SESI_PENGHALANGI_SQL = `
         (SELECT IF(ts.jam_selesai < ts.jam_mulai, 1, 0)
          FROM tshift ts
          INNER JOIN tkaryawan tk ON tk.kar_nik = rani.kar_nik
-         WHERE ts.kd_cabang = "20" AND ts.kd_shift = COALESCE(rani.shift, 0)
-           AND ts.tipe_hari = CASE
-               WHEN DAYOFWEEK(rani.tanggal_kerja) = 7 THEN IF(LOWER(COALESCE(tk.kar_sistem_gaji, "")) = "borongan", "SABTU_BORONGAN", "SABTU")
-               WHEN DAYOFWEEK(rani.tanggal_kerja) = 1 THEN "MINGGU"
-               ELSE "HARI"
-           END
+         WHERE ts.kd_cabang = tk.kar_kd_unit AND ts.kd_shift = COALESCE(rani.shift, 0)
+           AND ts.tipe_hari = ${rotiq.tipeJadwalSql('rani.tanggal_kerja', 'tk')}
          LIMIT 1) malam,
         (SELECT MIN(tanggal) FROM tabsensi
          WHERE kar_nik = rani.kar_nik AND COALESCE(shift, 0) = COALESCE(rani.shift, 0)
@@ -306,7 +318,7 @@ function cekTerlambat(shift, jam, toleransi_selesai) {
 
 // Shift akhir yang dipakai: Minggu selalu Day Shift, cabang lain juga Day Shift.
 function resolveShift(tipe, diminta, tipeShift, borongan) {
-    if (tipe === 'MINGGU') return SHIFT_DAY;
+    if (tipeShift === 'MINGGU') return SHIFT_DAY;
     if (!isNaN(diminta)) return diminta;
     return detectShift(tipeShift, undefined, borongan);
 }
@@ -331,11 +343,7 @@ const SQL_HISTORY_UNIT20 = `
             ) terlambat
         FROM tabsensitampung a
         INNER JOIN tkaryawan b ON a.kar_nik=b.kar_nik
-        LEFT JOIN tshift s ON s.kd_cabang = "20" AND s.kd_shift = COALESCE(a.shift, 0) AND s.tipe_hari = CASE
-            WHEN DAYOFWEEK(a.tanggal_kerja) = 7 THEN IF(LOWER(COALESCE(b.kar_sistem_gaji,"")) = "borongan", "SABTU_BORONGAN", "SABTU")
-            WHEN DAYOFWEEK(a.tanggal_kerja) = 1 THEN "MINGGU"
-            ELSE "HARI"
-        END
+        LEFT JOIN tshift s ON s.kd_cabang = b.kar_kd_unit AND s.kd_shift = COALESCE(a.shift, 0) AND s.tipe_hari = ${rotiq.tipeJadwalSql('a.tanggal_kerja', 'b')}
         WHERE a.tanggal_kerja IS NOT NULL
     ) FINAL
 `;
@@ -413,7 +421,7 @@ function prosesAbsen(req, res, coba = false) {
             // cabang BSM. Syarat hak akses ada di ON clause, bukan di sini, supaya
             // kd_unit dari karyawan lain tidak bisa mengganti titik acuan.
             // Radius ikut unit acuan, jadi tiap lokasi bisa beda.
-            `SELECT k.kar_kd_unit, k.kar_sistem_gaji,
+            `SELECT k.kar_kd_unit, k.kar_kd_jabat, k.kar_sistem_gaji,
                     COALESCE(p.latitude, u.latitude) lat_unit,
                     COALESCE(p.longitude, u.longitude) lng_unit,
                     COALESCE(p.radius_absen, u.radius_absen, ${RADIUS_JANGKAUAN}) radius_unit
@@ -433,9 +441,12 @@ function prosesAbsen(req, res, coba = false) {
 
                 // Gate dibaca dari data karyawan, bukan dari body client.
                 const kd_cabang = String(kary[0].kar_kd_unit || '');
+                const kd_jabat = String(kary[0].kar_kd_jabat || '');
                 const borongan = String(kary[0].kar_sistem_gaji || '').toLowerCase() === 'borongan';
-                const tipeShift = tipeShiftDari(tipe, borongan);
-                const isShift = kd_cabang === KD_CABANG_SHIFT && tipe !== 'MINGGU';
+                const kategoriRotiQ = rotiq.kategoriShift(kd_cabang, kd_jabat);
+                const tipeShift = tipeShiftDari(tipe, borongan, kategoriRotiQ === 'driver', kategoriRotiQ);
+               const isShift = pakaiShift(kd_cabang, kd_jabat) && (tipe !== "MINGGU" || kategoriRotiQ !== null);
+                const satuPerHari = isShift && kategoriRotiQ !== null && kategoriRotiQ !== 'driver';
 
                 // Minggu hanya Day Shift. Client yang mengirim shift lain tetap dipaksa ke 0.
                 const shift = isShift
@@ -462,14 +473,21 @@ function prosesAbsen(req, res, coba = false) {
 
                 // Toleransi hanya menandai terlambat, tidak menolak.
                 connection.query(
-                    `SELECT TIME_FORMAT(toleransi_selesai, "%H:%i:%s") toleransi_selesai
-                     FROM tshift WHERE kd_cabang = ? AND kd_shift = ? AND tipe_hari = ?`,
+                    `SELECT TIME_FORMAT(toleransi_mulai, "%H:%i:%s") toleransi_mulai,
+                            TIME_FORMAT(toleransi_selesai, "%H:%i:%s") toleransi_selesai
+                    FROM tshift WHERE kd_cabang = ? AND kd_shift = ? AND tipe_hari = ?`,
                     [kd_cabang, shift, tipeShift],
                     function (error, shiftRows) {
                         if (error) {
                             console.error(error);
                             return tolak('Terjadi kesalahan saat cek shift', 'error');
                         }
+
+                        if (isShift && unitRotiQ(kd_cabang) && !shiftRows.length) {
+                            return tolak('Shift tidak valid untuk unit ini', 'shift_invalid');
+                        }
+                        const bukaCheckIn = shiftRows.length ? shiftRows[0].toleransi_mulai : null;
+
                         const toleransi = shiftRows.length ? shiftRows[0].toleransi_selesai : null;
                         const terlambat = status_absen === 1 && cekTerlambat(shift, jam, toleransi);
 
@@ -487,6 +505,19 @@ function prosesAbsen(req, res, coba = false) {
                                 if (!cek.ok) return tolak(cek.pesan, cek.kode);
                                 lanjut(sesi.tanggalKerja, cek.perbaikan);
                             }, () => tolak('Terjadi kesalahan saat cek sesi', 'error'));
+                        }
+
+                       if (
+                            status_absen === 1 &&
+                            driverRotiQ(kd_cabang, kd_jabat) &&
+                            shift === SHIFT_SORE &&
+                            bukaCheckIn &&
+                            jam < bukaCheckIn
+                        ) {
+                            return tolak(
+                                `Check In sore baru dibuka pukul ${bukaCheckIn.slice(0, 5)}`,
+                                'belum_waktunya',
+                            );
                         }
 
                         // Check-in: sesi lama yang belum check-out masih memblokir sampai
@@ -513,16 +544,20 @@ function prosesAbsen(req, res, coba = false) {
                             // sampai batas MAX_CHECK_OUT (sudah divalidasi di bolehCheckOut).
                             if (status_absen === 1) {
                                 connection.query(
-                                    `SELECT COUNT(*) AS jml FROM tabsensitampung
-                                     WHERE kar_nik = ? AND tanggal_kerja = ? AND COALESCE(shift,0) = ? AND status_absen = ?`,
-                                    [kar_nik, kerja, shift, status_absen],
+                                satuPerHari
+                                    ? `SELECT COUNT(*) AS jml FROM tabsensitampung WHERE kar_nik = ? AND tanggal_kerja = ? AND status_absen = ?`
+                                    : `SELECT COUNT(*) AS jml FROM tabsensitampung WHERE kar_nik = ? AND tanggal_kerja = ? AND COALESCE(shift,0) = ? AND status_absen = ?`,
+                                satuPerHari ? [kar_nik, kerja, status_absen] : [kar_nik, kerja, shift, status_absen],
                                     function (error, rows) {
                                         if (error) {
                                             console.error(error);
                                             return tolak('Terjadi kesalahan saat cek absen', 'error');
                                         }
                                         if (rows[0].jml > 0) {
-                                            return tolak('Anda sudah Check In pada shift ini', 'duplicate');
+                                           const pesanDuplikat = isShift && !satuPerHari
+                                                ? 'Anda sudah Check In pada shift ini'
+                                                : 'Anda sudah Check In hari ini';
+                                            return tolak(pesanDuplikat, 'duplicate');
                                         }
                                         simpan();
                                     }
@@ -581,7 +616,7 @@ module.exports = {
             if (err) return res.status(500).json({ success: false, message: 'Koneksi database gagal', code: 'error' });
 
             connection.query(
-                'SELECT kar_kd_unit, kar_sistem_gaji FROM tkaryawan WHERE kar_nik = ? LIMIT 1',
+                'SELECT kar_kd_unit, kar_kd_jabat, kar_sistem_gaji FROM tkaryawan WHERE kar_nik = ? LIMIT 1',
                 [kar_nik],
                 function (err, kary) {
                     if (err) { connection.release(); return res.status(500).json({ success: false, message: 'Koneksi database gagal', code: 'error' }); }
@@ -593,13 +628,15 @@ module.exports = {
                     // Gate dari data karyawan, bukan dari body client.
                     const kd_cabang = String(kary[0].kar_kd_unit || '');
                     const borongan = String(kary[0].kar_sistem_gaji || '').toLowerCase() === 'borongan';
+                    const kd_jabat = String(kary[0].kar_kd_jabat || '');
+                    const kategoriRotiQ = rotiq.kategoriShift(kd_cabang, kd_jabat);
+                    const tipeShift = tipeShiftDari(tipe, borongan, kategoriRotiQ === 'driver', kategoriRotiQ);
 
-                    if (kd_cabang !== KD_CABANG_SHIFT || tipe === 'MINGGU') {
+                  if (!pakaiShift(kd_cabang, kd_jabat) || (tipe === 'MINGGU' && !kategoriRotiQ)) {
                         connection.release();
                         return kirim({ data: dayShift, default_shift: SHIFT_DAY, non_shift: true });
                     }
 
-                    const tipeShift = tipeShiftDari(tipe, borongan);
                     connection.query(
                         `SELECT kd_shift, nm_shift,
                             TIME_FORMAT(jam_mulai,"%H:%i") jam_mulai,
@@ -611,6 +648,16 @@ module.exports = {
                         function (error, results) {
                             connection.release();
                             if (error) return res.status(500).json({ success: false, message: 'Terjadi kesalahan saat cek shift', code: 'error' });
+                            if (unitRotiQ(kd_cabang)) {
+                                const sekarang = waktuJakarta().slice(11, 16);
+                                const sudahBuka = results.filter((r) => r.toleransi_mulai && r.toleransi_mulai <= sekarang);
+                                const terpilih = sudahBuka.length ? sudahBuka[sudahBuka.length - 1] : results[0];
+                                return kirim({
+                                    data: results,
+                                    default_shift: terpilih ? terpilih.kd_shift : SHIFT_DAY,
+                                    non_shift: false,
+                                });
+                            }
                             kirim({
                                 data: [...dayShift, ...results],
                                 default_shift: detectShift(tipeShift, undefined, borongan),
@@ -661,7 +708,7 @@ module.exports = {
             if (err) throw err;
 
             connection.query(
-                "SELECT kar_kd_unit FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
+                "SELECT kar_kd_unit, kar_kd_jabat FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
                 [kar_nama],
                 function (err, rows) {
                     if (err) throw err;
@@ -673,7 +720,7 @@ module.exports = {
                     }
 
                     let kd_unit = rows[0].kar_kd_unit;
-                    let isShiftUser = String(kd_unit) === KD_CABANG_SHIFT;
+                    let isShiftUser = pakaiShift(kd_unit, rows[0].kar_kd_jabat);
 
                     let sql, params;
                     if (isShiftUser) {
@@ -756,7 +803,7 @@ module.exports = {
             if (err) throw err;
 
             connection.query(
-                "SELECT kar_kd_unit, kar_nik FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
+                "SELECT kar_kd_unit, kar_kd_jabat, kar_nik FROM tkaryawan WHERE kar_nama = ? LIMIT 1",
                 [kar_nama],
                 function (err, rows) {
                     if (err) throw err;
@@ -769,7 +816,7 @@ module.exports = {
 
                     let kd_unit = rows[0].kar_kd_unit;
                     let kar_nik = rows[0].kar_nik;
-                    let isShiftUser = String(kd_unit) === KD_CABANG_SHIFT;
+                    let isShiftUser = pakaiShift(kd_unit, rows[0].kar_kd_jabat);
 
                     if (isShiftUser) {
                         // Cabang 20: sesi 7 hari terakhir per (tanggal_kerja, shift).
