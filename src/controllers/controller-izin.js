@@ -84,7 +84,7 @@ module.exports = {
     getIzinKaryawan(req, res) {
         let { kar_nik, start_date, end_date, status } = req.body;
 
-        let sql = `SELECT * FROM tijintampung WHERE kar_nik = ?`;
+        let sql = `SELECT ij_nomor, kar_nik, DATE_FORMAT(tanggal, '%Y-%m-%d %H:%i:%s') AS tanggal, alasan, Keterangan, ij_foto, ij_shift, ij_status, ij_nomor_tujuan FROM tijintampung WHERE kar_nik = ?`;
         let params = [kar_nik];
 
         if (start_date) {
@@ -251,7 +251,7 @@ module.exports = {
         // Buat placeholder ? sebanyak unit
         const placeholders = unitsArray.map(() => '?').join(',');
 
-        let sql = `SELECT tijintampung.*, tkaryawan.kar_nama, tkaryawan.kar_kd_unit, tunit.nm_unit 
+        let sql = `SELECT ij_nomor, kar_nik, DATE_FORMAT(tanggal, '%Y-%m-%d %H:%i:%s') AS tanggal, alasan, Keterangan, ij_foto, ij_shift, ij_status, ij_nomor_tujuan, tkaryawan.kar_nama, tkaryawan.kar_kd_unit, tunit.nm_unit 
                FROM tijintampung 
                INNER JOIN tkaryawan ON tijintampung.kar_nik = tkaryawan.kar_nik 
                LEFT JOIN tunit ON tkaryawan.kar_kd_unit = tunit.kd_unit 
