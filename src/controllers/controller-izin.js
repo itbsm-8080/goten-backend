@@ -70,6 +70,15 @@ function getMaxKodeTijin(tanggal, callback) {
     });
 }
 
+function periodeCuti(sekarang = new Date()) {
+  const [tahun, bulan, hari] = sekarang
+    .toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" })
+    .split("-")
+    .map(Number);
+  const mulaiTahun = bulan === 12 && hari >= 26 ? tahun : tahun - 1;
+  return { mulai: `${mulaiTahun}-12-26`, selesai: `${mulaiTahun + 1}-12-25` };
+}
+
 module.exports = {
     // Get list izin
     getIzinKaryawan(req, res) {
@@ -419,7 +428,7 @@ module.exports = {
             return;
         }
 
-        const tahunIni = new Date().getFullYear();
+        const { mulai, selesai } = periodeCuti();
 
         // Pakai single connection + parallel queries
         pool.getConnection(function (err, connection) {
@@ -448,7 +457,9 @@ module.exports = {
                     }
 
                     const tglMasuk = karyawan[0].kar_tgl_masuk;
-                    const jabat = karyawan[0].kar_kd_jabat != null ? String(karyawan[0].kar_kd_jabat) : null;
+                    const jabat = karyawan[0].kar_kd_jabat != null
+                        ? String(karyawan[0].kar_kd_jabat)
+                        : null;
                     const sistemGaji = karyawan[0].kar_sistem_gaji;
 
                     // Jabatan tertentu tidak berhak cuti
@@ -530,11 +541,14 @@ module.exports = {
                     // Query libur
                     connection.query(
                         `SELECT COUNT(*) as jml FROM tharilibur 
-                     WHERE hl_ispotongcuti = 1 AND YEAR(hl_tanggal) = ?`,
-                        [tahunIni],
+                        WHERE hl_ispotongcuti = 1 
+                        AND DATE(hl_tanggal) BETWEEN ? AND ?`,
+                        [mulai, selesai],
                         function (errLibur, resultLibur) {
-                            if (!errLibur && resultLibur.length) {
-                                terpakaiLibur = resultLibur[0].jml || 0;
+                            if (errLibur) {
+                                console.error('[QUERY LIBUR] Error:', errLibur);
+                            } else {
+                                terpakaiLibur = Number(resultLibur[0]?.jml || 0);
                             }
                             checkDone();
                         }
@@ -543,13 +557,15 @@ module.exports = {
                     // Query izin
                     connection.query(
                         `SELECT COUNT(*) as jml FROM tijin 
-                     WHERE kar_nik = ? 
-                     AND alasan = 'Cuti Tahunan' 
-                     AND YEAR(tanggal) = ?`,
-                        [kar_nik, tahunIni],
+                        WHERE kar_nik = ? 
+                        AND alasan = 'Cuti Tahunan' 
+                        AND DATE(tanggal) BETWEEN ? AND ?`,
+                        [kar_nik, mulai, selesai],
                         function (errIzin, resultIzin) {
-                            if (!errIzin && resultIzin.length) {
-                                terpakaiIzin = resultIzin[0].jml || 0;
+                            if (errIzin) {
+                                console.error('[QUERY IZIN] Error:', errIzin);
+                            } else {
+                                terpakaiIzin = Number(resultIzin[0]?.jml || 0);
                             }
                             checkDone();
                         }
@@ -564,7 +580,7 @@ module.exports = {
         pool.getConnection(function (err, connection) {
             if (err) throw err;
             connection.query(
-                `SELECT kar_kd_unit, kar_kd_jabat FROM tkaryawan WHERE kar_nik = ?`,
+                `SELECT kar_nama, kar_kd_unit, kar_kd_jabat FROM tkaryawan WHERE kar_nik = ?`,
                 [kar_nik],
                 function (error, results) {
                     if (error || !results.length) {
@@ -576,17 +592,22 @@ module.exports = {
                     const kdUnit = results[0].kar_kd_unit;
                     const kdJabat = results[0].kar_kd_jabat;
 
-                    const isRotiqMobile = rotiq.isRotiQMobile(kdUnit, kdJabat);
+                    // Pengguna tertentu memiliki akses absensi di semua unit berdasarkan validasi koordinat.
                     // Akunting (jabat 72) di unit pusat 18 boleh absen di semua cabang PT Bumi Sarana Maju.
-                    const isAkunting = rotiq.isAkunting(kdUnit, kdJabat);
+                    // Karyawan RotiQ Mobile dapat absen di seluruh unit RotiQ.
+                    const semuaUnit = rotiq.bisaSemuaUnit(kar_nik);
+                    const isRotiqMobile = !semuaUnit && rotiq.isRotiQMobile(kdUnit, kdJabat);
+                    const isAkunting = !semuaUnit && rotiq.isAkunting(kdUnit, kdJabat);
 
-                    if (isRotiqMobile || isAkunting) {
-                        const filterUnit = isAkunting
-                            ? `nm_unit2 = '${rotiq.NM_UNIT2_BSM}'`
-                            : `nm_unit LIKE '${rotiq.NM_UNIT_ROTIQ}'`;
+                    if (isRotiqMobile || isAkunting || semuaUnit) {
+                        const filterUnit = semuaUnit
+                            ? rotiq.syaratKoordinat()
+                            : isAkunting
+                                ? `nm_unit2 = '${rotiq.NM_UNIT2_BSM}'`
+                                : `nm_unit LIKE '${rotiq.NM_UNIT_ROTIQ}'`;
                         connection.query(
                             `SELECT kd_unit, nm_unit, nm_unit2, latitude, longitude, radius_absen FROM tunit 
-                         WHERE ${filterUnit} ORDER BY kd_unit`,
+                        WHERE ${filterUnit} ORDER BY nm_unit, kd_unit`,
                             function (err2, units) {
                                 connection.release();
                                 if (err2) {
@@ -596,7 +617,8 @@ module.exports = {
                                         success: true,
                                         is_rotiq_mobile: isRotiqMobile,
                                         is_akunting: isAkunting,
-                                        units: units
+                                        units: units,
+                                        is_semua_unit: semuaUnit,
                                     });
                                 }
                             }

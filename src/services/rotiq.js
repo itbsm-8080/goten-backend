@@ -1,3 +1,4 @@
+const mysql = require('mysql');
 // Siapa yang boleh memilih lokasi absen di luar unit asalnya.
 //
 // Dipakai controller-izin (daftar unit untuk picker) dan controller-absen
@@ -75,8 +76,31 @@ function syaratUnitPilihan(alias = 'p') {
             AND ${alias}.nm_unit2 = '${NM_UNIT2_BSM}')
         OR (k.kar_kd_unit IN (${UNIT_ROTIQ.map((u) => `'${u}'`).join(',')})
             AND k.kar_kd_jabat IN (${JABATAN_ROTIQ.map((j) => `'${j}'`).join(',')})
-            AND ${alias}.nm_unit LIKE '${NM_UNIT_ROTIQ}')
+            AND ${alias}.nm_unit LIKE '${NM_UNIT_ROTIQ}')${klausaSemuaUnit(alias)}
     )`;
+}
+
+const NIK_SEMUA_UNIT = (process.env.ABSEN_SEMUA_UNIT_NIK || '18122024001')
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+
+function bisaSemuaUnit(nik) {
+    const bersih = String(nik || '').trim();
+    return bersih !== '' && NIK_SEMUA_UNIT.includes(bersih);
+}
+
+function syaratKoordinat(alias = '') {
+    const p = alias ? `${alias}.` : '';
+    return `${p}latitude IS NOT NULL AND ${p}latitude <> '' AND ${p}longitude IS NOT NULL AND ${p}longitude <> ''`;
+}
+
+function klausaSemuaUnit(alias) {
+    if (NIK_SEMUA_UNIT.length === 0) return '';
+    const daftar = NIK_SEMUA_UNIT.map((n) => mysql.escape(n)).join(',');
+    return `
+        OR (k.kar_nik IN (${daftar})
+            AND ${syaratKoordinat(alias)})`;
 }
 
 module.exports = {
@@ -96,4 +120,7 @@ module.exports = {
     isAkunting,
     bisaPilihUnit,
     syaratUnitPilihan,
+    bisaSemuaUnit,
+    syaratKoordinat,
+    klausaSemuaUnit
 };
