@@ -105,6 +105,7 @@ function klausaSemuaUnit(alias) {
 
 module.exports = {
     UNIT_ROTIQ,
+    UNIT_ROTIQ_SQL,
     JABATAN_ROTIQ,
     JABATAN_KASIR,
     JABATAN_DRIVER,
