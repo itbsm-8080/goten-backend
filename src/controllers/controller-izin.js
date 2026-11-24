@@ -251,7 +251,7 @@ module.exports = {
         // Buat placeholder ? sebanyak unit
         const placeholders = unitsArray.map(() => '?').join(',');
 
-        let sql = `SELECT ij_nomor, kar_nik, DATE_FORMAT(tanggal, '%Y-%m-%d %H:%i:%s') AS tanggal, alasan, Keterangan, ij_foto, ij_shift, ij_status, ij_nomor_tujuan, tkaryawan.kar_nama, tkaryawan.kar_kd_unit, tunit.nm_unit 
+        let sql = `SELECT ij_nomor, tijintampung.kar_nik, DATE_FORMAT(tanggal, '%Y-%m-%d %H:%i:%s') AS tanggal, alasan, Keterangan, ij_foto, ij_shift, ij_status, ij_nomor_tujuan, tkaryawan.kar_nama, tkaryawan.kar_kd_unit, tunit.nm_unit 
                FROM tijintampung 
                INNER JOIN tkaryawan ON tijintampung.kar_nik = tkaryawan.kar_nik 
                LEFT JOIN tunit ON tkaryawan.kar_kd_unit = tunit.kd_unit 
